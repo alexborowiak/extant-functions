@@ -337,7 +337,8 @@ def draw_reveal(
 
 @plot("figure")
 def stack_grid(das, dim="season", hlines=(), title=None, x="time",
-               fig=None, spec=None, layout=None, **layout_kwargs):
+               fig=None, spec=None, layout=None, ax=None, axes=None,
+               **layout_kwargs):
     """One stacked panel per value of a dimension, sharing a y range.
 
     Parameters
@@ -352,6 +353,9 @@ def stack_grid(das, dim="season", hlines=(), title=None, x="time",
         Title above the top panel.
     x : str
         X axis label for the bottom panel.
+    ax, axes : matplotlib.axes.Axes or array-like, optional
+        Caller-owned panel axes. Use `ax` for a one-panel result and `axes`
+        for the complete grid; their figure is inferred when omitted.
     fig, spec, layout, **layout_kwargs
         Standard figure-function arguments; see core.open_layout.
 
@@ -382,7 +386,8 @@ def stack_grid(das, dim="season", hlines=(), title=None, x="time",
     layout_kwargs.setdefault("panel_h", 1.4)
     layout_kwargs.setdefault("panel_w", 7.0)
     panels = core.panel_grid(values, [None], draw, fig=fig, spec=spec,
-                             layout=layout, sharex=True, **layout_kwargs)
+                             layout=layout, ax=ax, axes=axes, sharex=True,
+                             **layout_kwargs)
 
     column = panels.axes[:, 0]
     ylims = [ax.get_ylim() for ax in column]
@@ -403,18 +408,61 @@ def stack_grid(das, dim="season", hlines=(), title=None, x="time",
 # --------------------------------------------------------------------------
 
 @plot("figure")
-def quantile_stack_grid(da, gs, fig, dim="season", hlines=(), **kwargs):
+def quantile_stack_grid(da, gs=None, fig=None, dim="season", hlines=(),
+                        ax=None, axes=None, **kwargs):
     """One `stack_grid` per quantile, cell i of `gs` holding quantile i.
 
     A worked example of nesting: each stack is a full figure function given a
-    cell of the parent grid rather than a canvas of its own.
+    cell of the parent grid rather than a canvas of its own. Alternatively,
+    pass all caller-owned axes as a `(dim, quantile)` grid.
+
+    Parameters
+    ----------
+    gs, fig
+        Parent GridSpec cells and their figure. Required unless `ax` or `axes`
+        is supplied.
+    ax : matplotlib.axes.Axes or None
+        One target axes, valid only when the requested `(dim, quantile)` grid
+        has one panel.
+    axes : array-like of matplotlib.axes.Axes or None
+        Caller-owned axes in row-major `(dim, quantile)` order. Their common
+        figure is inferred when omitted.
 
     Returns
     -------
     list of core.Panels
     """
+    if ax is not None:
+        if axes is not None:
+            raise ValueError("pass either ax or axes, not both")
+        axes = ax
+
+    quantiles = da["quantile"].values
+    if axes is not None:
+        axes = np.asarray(axes, dtype=object)
+        expected = (da.sizes[dim], len(quantiles))
+        if axes.size != np.prod(expected):
+            raise ValueError(f"received {axes.size} axes for a {expected} panel grid")
+        axes = axes.reshape(expected)
+        axes_fig = axes.flat[0].figure
+        if any(candidate.figure is not axes_fig for candidate in axes.flat):
+            raise ValueError("all supplied axes must belong to the same figure")
+        if fig is None:
+            fig = axes_fig
+        elif fig is not axes_fig:
+            raise ValueError("fig does not own the supplied axes")
+        return [
+            stack_grid(
+                da.sel(quantile=q), dim=dim, hlines=hlines, fig=fig,
+                axes=axes[:, i], title=f"{q * 100:g}th Percentile", **kwargs
+            )
+            for i, q in enumerate(quantiles)
+        ]
+
+    if gs is None or fig is None:
+        raise ValueError("pass gs and fig, or caller-owned ax/axes")
     return [
         stack_grid(da.sel(quantile=q), dim=dim, hlines=hlines, fig=fig, spec=gs[i],
                    title=f"{q * 100:g}th Percentile", **kwargs)
-        for i, q in enumerate(da["quantile"].values)
+        for i, q in enumerate(quantiles)
     ]

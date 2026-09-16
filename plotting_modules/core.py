@@ -7,12 +7,14 @@ first argument:
       A panel function. Draws into an axes you already have. Never creates a
       figure, never sets limits or titles that belong to the grid around it.
 
-  <name>(data, ..., fig=None, spec=None, layout=None, **layout_kwargs) -> Panels
-      A figure function. Builds a grid of panels. Three ways to call it:
+  <name>(data, ..., ax=None, axes=None, fig=None, spec=None, layout=None,
+         **layout_kwargs) -> Panels
+      A figure function. Builds a grid of panels. Four ways to call it:
         no keywords          it sizes and creates its own figure
         layout=GridLayout()  it uses the layout you built
         spec=gs[0, 1]        it subdivides that cell of a parent grid
-      All three return Panels, and every figure function has the same body:
+        ax= / axes=          it draws into axes you already made
+      All four return Panels, and every figure function has the same body:
       resolve the layout, run panel_grid, decorate, return.
 
 Which of the three you used is the only thing that varies downstream, and it is
@@ -25,6 +27,10 @@ handled by the Layout objects rather than by branches in each function:
 
 Both expose make_gridspec, cbar_ax and title_y, so a figure function never has
 to ask which one it got.
+
+Colorbar geometry belongs to the layout: a new GridLayout uses
+`cbar_height` and `cbar_gap` in inches; a nested layout uses its relative
+`cbar_frac`; caller-owned axes use a caller-owned `cax`.
 """
 
 import string
@@ -120,7 +126,12 @@ class GridLayout:
         self.wspace = wspace
         self.hspace = hspace
         self.has_cbar = has_cbar
+        if has_cbar and cbar_height <= 0:
+            raise ValueError("cbar_height must be positive")
+        if has_cbar and cbar_gap < 0:
+            raise ValueError("cbar_gap cannot be negative")
         self.cbar_height = cbar_height
+        self.cbar_gap = cbar_gap
 
         if left is None:
             left = MARGIN_LEFT + (ROW_LABEL_SPACE if row_labels else 0.0)
@@ -132,7 +143,7 @@ class GridLayout:
             self.cbar_y0 = (
                 bottom + CBAR_TICK_SPACE + (CBAR_LABEL_SPACE if has_cbar_label else 0.0)
             )
-            self.bottom_in = self.cbar_y0 + cbar_height + cbar_gap
+            self.bottom_in = self.cbar_y0 + self.cbar_height + self.cbar_gap
         else:
             self.cbar_y0 = None
             self.bottom_in = bottom
@@ -180,12 +191,15 @@ class GridLayout:
         """Colorbar axes spanning columns first_col..last_col inclusive.
 
         Aligning to whole columns is what makes two bars in one figure line up
-        with the panels above them. Call it once per bar.
+        with the panels above them. Set `cbar_height` when building the layout;
+        a different per-call `height` would not reserve matching space.
         """
         if not self.has_cbar:
             raise ValueError("layout was built with has_cbar=False")
+        if height is not None and height != self.cbar_height:
+            raise ValueError("set cbar_height when constructing GridLayout")
         last_col = self.n_cols - 1 if last_col is None else last_col
-        height = self.cbar_height if height is None else height
+        height = self.cbar_height
         x0 = self.col_left(first_col) + inset
         x1 = self.col_left(last_col) + self.col_widths[last_col] - inset
         return fig.add_axes(
@@ -272,6 +286,8 @@ class NestedLayout:
         """Colorbar axes in the reserved bottom row of the sub-gridspec."""
         if not self.has_cbar:
             raise ValueError("layout was built with has_cbar=False")
+        if "height" in ignored:
+            raise ValueError("nested layouts use cbar_frac instead of height")
         last_col = self.n_cols - 1 if last_col is None else last_col
         return fig.add_subplot(self._gs[-1, first_col : last_col + 1])
 
@@ -298,7 +314,9 @@ def open_layout(n_rows, n_cols, fig=None, spec=None, layout=None, **layout_kwarg
     layout : GridLayout or NestedLayout or None
         A layout you built yourself, which wins over both of the above.
     **layout_kwargs
-        Passed to whichever layout class is constructed.
+        Passed to whichever layout class is constructed. For a new
+        `GridLayout`, `cbar_height` and `cbar_gap` are measured in inches;
+        `NestedLayout` instead uses relative `cbar_frac`.
 
     Returns
     -------
@@ -462,6 +480,37 @@ def make_axes(
     return axes
 
 
+def _panel_axes(axes, n_rows, n_cols):
+    """Return caller-owned axes as a row-major grid of the requested shape."""
+    axes = np.asarray(axes, dtype=object)
+    if axes.size != n_rows * n_cols:
+        raise ValueError(
+            f"received {axes.size} axes for a {(n_rows, n_cols)} panel grid"
+        )
+    return axes.reshape(n_rows, n_cols)
+
+
+def _share_axes(axes, sharex, sharey):
+    """Apply the same sharing groups to caller-owned axes as new axes."""
+    x_refs, y_refs = {}, {}
+    for (row, col), ax in np.ndenumerate(axes):
+        xk, yk = _share_key(sharex, row, col), _share_key(sharey, row, col)
+        if xk is not None:
+            if xk in x_refs:
+                ref = x_refs[xk]
+                if not ax.get_shared_x_axes().joined(ax, ref):
+                    ax.sharex(ref)
+            else:
+                x_refs[xk] = ax
+        if yk is not None:
+            if yk in y_refs:
+                ref = y_refs[yk]
+                if not ax.get_shared_y_axes().joined(ax, ref):
+                    ax.sharey(ref)
+            else:
+                y_refs[yk] = ax
+
+
 def panel_grid(
     row_vals,
     col_vals,
@@ -474,6 +523,7 @@ def panel_grid(
     projection=None,
     sharex=False,
     sharey=False,
+    ax=None,
     **layout_kwargs,
 ):
     """Draw one panel per (row value, column value) pair.
@@ -491,17 +541,25 @@ def panel_grid(
     draw : callable
         ``draw(ax, row_val, col_val)``. Its return value is collected, which is
         how a mappable gets back out for a colorbar.
-    fig, gs, axes, spec, layout, **layout_kwargs
-        Ways in, most specific first: `axes` uses them as given, `gs` builds
-        axes on it, otherwise `open_layout` resolves the rest.
+    fig, gs, axes, spec, layout, projection, sharex, sharey, ax, **layout_kwargs
+        Ways in, most specific first: `ax` is a one-panel shorthand and
+        `axes` uses caller-owned axes in row-major order. Their figure is
+        inferred when `fig` is omitted. `gs` builds axes on it; otherwise
+        `open_layout` resolves the rest.
     projection, sharex, sharey
-        Passed to `make_axes` when this call builds the axes.
+        `projection` is used when this call builds axes. Sharing is applied
+        whether axes are created here or supplied by the caller.
 
     Returns
     -------
     Panels
     """
     n_rows, n_cols = len(row_vals), len(col_vals)
+
+    if ax is not None:
+        if axes is not None:
+            raise ValueError("pass either ax or axes, not both")
+        axes = ax
 
     if axes is None:
         if gs is None:
@@ -513,14 +571,16 @@ def panel_grid(
         axes = make_axes(
             fig, gs, n_rows, n_cols, projection=projection, sharex=sharex, sharey=sharey
         )
-    elif fig is None:
-        raise ValueError("pass a fig alongside axes")
-
-    axes = np.atleast_2d(axes)
-    if axes.shape != (n_rows, n_cols):
-        raise ValueError(
-            f"axes shape {axes.shape} does not match panel grid {(n_rows, n_cols)}"
-        )
+    else:
+        axes = _panel_axes(axes, n_rows, n_cols)
+        axes_fig = axes.flat[0].figure
+        if any(candidate.figure is not axes_fig for candidate in axes.flat):
+            raise ValueError("all supplied axes must belong to the same figure")
+        if fig is None:
+            fig = axes_fig
+        elif fig is not axes_fig:
+            raise ValueError("fig does not own the supplied axes")
+        _share_axes(axes, sharex, sharey)
 
     artists = np.empty((n_rows, n_cols), dtype=object)
     for r, row_val in enumerate(row_vals):
@@ -659,6 +719,8 @@ def add_colorbar(
     fontsize=10,
 ):
     """Horizontal colorbar in `cax`, ticked at every `tick_step` level."""
+    if cax is None or cax.figure is not fig:
+        raise ValueError("cax must belong to fig")
     if ticks is None and levels is not None:
         ticks = np.asarray(levels)[::tick_step]
     cb = fig.colorbar(mappable, cax=cax, orientation="horizontal", ticks=ticks)

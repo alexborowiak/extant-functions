@@ -6,7 +6,8 @@ Layers:
               sel/row/col into the coordinates core.panel_grid iterates over.
   Figure      polar_grid — DataArray in, figure out.
 
-Mixed figures skip polar_grid and pass draw_polar to core.panel_grid directly.
+For mixed figures, pass caller-owned `axes` to polar_grid. Use draw_polar only
+when the panels need a custom callback.
 """
 
 from functools import partial
@@ -192,7 +193,8 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
                levels=np.linspace(-3, 3, 13), cmap="RdBu_r",
                lat_name="lat", lon_name="lon", label_fmt=None,
                title=None, cbar_label=None, projection=None, tag=True,
-               fig=None, spec=None, layout=None, **layout_kwargs):
+               fig=None, spec=None, layout=None, ax=None, axes=None, cax=None,
+               cbar_height=None, cbar_gap=None, **layout_kwargs):
     """Grid of polar panels with two dimensions mapped to rows and columns.
 
     Every dimension other than latitude, longitude, row_dim and col_dim must be
@@ -217,35 +219,82 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
     label_fmt : dict or None
         Mapping of dimension name to a callable formatting its values.
     title : str or None
-        Figure title. Ignored for a nested layout, which does not own the top
-        of the canvas.
+        Figure title. Added only when this function owns the figure; caller-
+        owned axes and nested layouts leave the figure title to their caller.
     cbar_label : str or None
         Label under the colorbar, e.g. units.
     projection : cartopy.crs.Projection or None
-        Defaults to SouthPolarStereo.
+        Defaults to SouthPolarStereo when this function creates the axes.
     tag : bool
         Letter the panels a) b) c).
+    ax : cartopy.mpl.geoaxes.GeoAxes or None
+        Target for a one-panel grid. Its figure is inferred when `fig` is
+        omitted.
+    axes : array-like of cartopy.mpl.geoaxes.GeoAxes or None
+        Targets for a multi-panel grid, in row-major order. They must already
+        use the desired Cartopy projection.
+    cax : matplotlib.axes.Axes or None
+        Colorbar axes. A colorbar is created automatically only when this
+        function creates its panel axes; pass `cax` for caller-owned axes.
+    cbar_height, cbar_gap : float or None
+        Thickness and gap above an automatic colorbar, in inches. These apply
+        when this function creates a `GridLayout`; nested layouts use
+        `cbar_frac`, and a caller-owned `cax` controls its own geometry.
     fig, spec, layout, **layout_kwargs
         Standard figure-function arguments; see core.open_layout.
 
     Returns
     -------
     core.Panels
+
+    Examples
+    --------
+    Put three fields into rows of one caller-owned figure::
+
+        import matplotlib.pyplot as plt
+        import xarray as xr
+        import cartopy.crs as ccrs
+
+        fig, axes = plt.subplots(
+            3, n_periods, squeeze=False,
+            subplot_kw={"projection": ccrs.SouthPolarStereo()},
+        )
+        fields = xr.concat(
+            (signal, noise, sn),
+            dim=xr.IndexVariable("kind", ("signal", "noise", "sn")),
+        )
+        polar_grid(fields, row_dim="kind", col_dim="period", axes=axes, tag=False)
+
+    Add a colorbar without changing the map layout by passing a dedicated
+    `cax` to the call that should own it.
     """
     da, row_vals, col_vals = prepare(da, sel, row_dim, col_dim, lat_name, lon_name)
     fmt = label_fmt or {}
+    caller_axes = ax is not None or axes is not None
 
     layout_kwargs.setdefault("row_labels", any(v is not None for v in row_vals))
     layout_kwargs.setdefault("has_title", title is not None)
-    layout_kwargs.setdefault("has_cbar", True)
-    layout_kwargs.setdefault("has_cbar_label", cbar_label is not None)
+    layout_kwargs.setdefault("has_cbar", cax is None)
+    layout_kwargs.setdefault("has_cbar_label", cbar_label is not None and cax is None)
+    if cbar_height is not None or cbar_gap is not None:
+        if caller_axes or cax is not None:
+            raise ValueError("cbar_height/cbar_gap do not resize caller-owned cax")
+        if spec is not None or layout is not None:
+            raise ValueError(
+                "cbar_height/cbar_gap need a new GridLayout; use cbar_frac for a "
+                "nested layout or configure a supplied layout directly"
+            )
+        if cbar_height is not None:
+            layout_kwargs["cbar_height"] = cbar_height
+        if cbar_gap is not None:
+            layout_kwargs["cbar_gap"] = cbar_gap
 
     panels = panel_grid(
         row_vals,
         col_vals,
         partial(draw_polar, da=da, row_dim=row_dim, col_dim=col_dim,
                 levels=levels, cmap=cmap, lat_name=lat_name, lon_name=lon_name),
-        fig=fig, spec=spec, layout=layout,
+        fig=fig, spec=spec, layout=layout, ax=ax, axes=axes,
         projection=projection or ccrs.SouthPolarStereo(),
         **layout_kwargs,
     )
@@ -255,14 +304,17 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
     if tag:
         tag_panels(panels.axes)
 
-    panels.extras["cbar"] = add_colorbar(
-        panels.fig,
-        panels.artists[0, 0],
-        panels.layout.cbar_ax(panels.fig, 0, len(col_vals) - 1),
-        levels=levels,
-        label=cbar_label,
-    )
-    if title and panels.layout.owns_figure:
+    if cax is None and not caller_axes:
+        cax = panels.layout.cbar_ax(panels.fig, 0, len(col_vals) - 1)
+    if cax is not None:
+        panels.extras["cbar"] = add_colorbar(
+            panels.fig,
+            panels.artists[0, 0],
+            cax,
+            levels=levels,
+            label=cbar_label,
+        )
+    if title and not caller_axes and panels.layout.owns_figure:
         add_suptitle(panels.fig, panels.layout, title)
 
     return panels

@@ -21,7 +21,7 @@ def draw_members(ax, values, width=0.75, color="#3b6ea5"):
     ax.set_ylim(vmin - pad, vmax + pad)
     ax.set_xlim(-0.75, len(members) - 0.25)
     ax.tick_params(labelsize=8)
-    style_ax(ax)
+    core.style_ax(ax)
     return bars
 
 
@@ -65,7 +65,8 @@ def _grid(rows, cols, draw, xlabel, col_fmt=str, **kwargs):
 
 
 @plot("figure")
-def kde_grid(kde, periods, colors, variable="tas", **kwargs):
+def kde_grid(kde, periods, colors, variable="tas", fig=None, spec=None, layout=None,
+             ax=None, axes=None, **layout_kwargs):
     """One KDE per (experiment, period), experiments down, periods across.
 
     Parameters
@@ -78,7 +79,10 @@ def kde_grid(kde, periods, colors, variable="tas", **kwargs):
         Experiment -> colour, keyed the same way as `kde`.
     variable : str
         Variable to plot.
-    **kwargs
+    ax, axes : matplotlib.axes.Axes or array-like, optional
+        Caller-owned panel axes. Use `ax` for a one-panel result and `axes`
+        for the complete grid; their figure is inferred when omitted.
+    fig, spec, layout, **layout_kwargs
         Standard figure-function arguments; see core.open_layout.
 
     Returns
@@ -96,15 +100,22 @@ def kde_grid(kde, periods, colors, variable="tas", **kwargs):
         core.style_ax(ax)
         return line
 
-    return _grid(list(kde), periods, draw, variable, col_fmt=period_label, **kwargs)
+    return _grid(
+        list(kde), periods, draw, variable, col_fmt=period_label, fig=fig,
+        spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
+    )
 
 
 @plot("figure")
-def kde_overlay(kde, periods, colors, variable="tas", **kwargs):
+def kde_overlay(kde, periods, colors, variable="tas", fig=None, spec=None, layout=None,
+                ax=None, axes=None, **layout_kwargs):
     """One panel per period, all experiments overlaid.
 
     Same arguments as `kde_grid`. Kept separate rather than folded in as a mode
     flag: the two share no layout, no legend handling and no axis labelling.
+
+    `ax`, `axes`, `fig`, `spec`, `layout` and `layout_kwargs` follow the
+    `kde_grid` contract.
 
     Returns
     -------
@@ -124,7 +135,10 @@ def kde_overlay(kde, periods, colors, variable="tas", **kwargs):
         core.style_ax(ax)
         return lines
 
-    panels = _grid([None], periods, draw, variable, col_fmt=period_label, **kwargs)
+    panels = _grid(
+        [None], periods, draw, variable, col_fmt=period_label, fig=fig,
+        spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
+    )
     panels.axes[0, 0].set_ylabel("Density")
     handles, labels = panels.axes[0, 0].get_legend_handles_labels()
     panels.extras["legend"] = panels.fig.legend(
@@ -135,10 +149,12 @@ def kde_overlay(kde, periods, colors, variable="tas", **kwargs):
 
 
 @plot("figure")
-def hist_grid(point, periods, colors, variable="tas", n_bins=20, **kwargs):
+def hist_grid(point, periods, colors, variable="tas", n_bins=20, fig=None,
+              spec=None, layout=None, ax=None, axes=None, **layout_kwargs):
     """One histogram per (experiment, period), on shared bins.
 
-    `colors` is keyed by experiment, matching `kde_grid`.
+    `colors` is keyed by experiment, matching `kde_grid`. `ax`, `axes`, `fig`,
+    `spec`, `layout` and `layout_kwargs` follow the `kde_grid` contract.
 
     Returns
     -------
@@ -158,6 +174,9 @@ def hist_grid(point, periods, colors, variable="tas", n_bins=20, **kwargs):
         core.style_ax(ax)
         return out
 
-    panels = _grid(experiments, periods, draw, variable, col_fmt=period_label, **kwargs)
+    panels = _grid(
+        experiments, periods, draw, variable, col_fmt=period_label, fig=fig,
+        spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
+    )
     panels.extras["bins"] = bins
     return panels

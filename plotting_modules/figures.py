@@ -46,7 +46,9 @@ def quantile_matrix(ds, row_dim="season", quant_dim="quantile", q_low=0.1, q_hig
                     diff_levels=np.linspace(-2, 2, 9), cmap="RdBu_r",
                     lat_name="lat", lon_name="lon", title=None,
                     raw_label=None, diff_label=None,
-                    fig=None, spec=None, layout=None, **layout_kwargs):
+                    fig=None, spec=None, layout=None, ax=None, axes=None,
+                    caxes=None, cbar_height=None, cbar_gap=None,
+                    **layout_kwargs):
     """Polar panels: low, median and high quantile, and their difference.
 
     Parameters
@@ -64,9 +66,18 @@ def quantile_matrix(ds, row_dim="season", quant_dim="quantile", q_low=0.1, q_hig
     lat_name, lon_name : str
         Names of the latitude and longitude coordinates.
     title : str or None
-        Figure title.
+        Figure title, added only when this function owns the figure.
     raw_label, diff_label : str or None
         Labels under the two colorbars.
+    ax, axes : matplotlib.axes.Axes or array-like, optional
+        Caller-owned panel axes. Use `axes` for this complete grid; `ax` is
+        the one-panel shorthand in figure functions that produce one panel.
+    caxes : pair of matplotlib.axes.Axes or None
+        Targets for the raw and difference colorbars. With caller-owned panel
+        axes, colorbars are added only when this is supplied.
+    cbar_height, cbar_gap : float or None
+        Thickness and gap above automatic colorbars, in inches. They apply to
+        a new `GridLayout`; nested layouts use relative `cbar_frac`.
     fig, spec, layout, **layout_kwargs
         Standard figure-function arguments; see core.open_layout.
 
@@ -93,24 +104,50 @@ def quantile_matrix(ds, row_dim="season", quant_dim="quantile", q_low=0.1, q_hig
 
     layout_kwargs.setdefault("row_labels", any(v is not None for v in row_vals))
     layout_kwargs.setdefault("has_title", title is not None)
-    layout_kwargs.setdefault("has_cbar", True)
-    layout_kwargs.setdefault("has_cbar_label", raw_label is not None or diff_label is not None)
+    layout_kwargs.setdefault("has_cbar", caxes is None)
+    layout_kwargs.setdefault(
+        "has_cbar_label", caxes is None and (raw_label is not None or diff_label is not None)
+    )
+    caller_axes = ax is not None or axes is not None
+    if cbar_height is not None or cbar_gap is not None:
+        if caller_axes or caxes is not None:
+            raise ValueError("cbar_height/cbar_gap do not resize caller-owned caxes")
+        if spec is not None or layout is not None:
+            raise ValueError(
+                "cbar_height/cbar_gap need a new GridLayout; use cbar_frac for a "
+                "nested layout or configure a supplied layout directly"
+            )
+        if cbar_height is not None:
+            layout_kwargs["cbar_height"] = cbar_height
+        if cbar_gap is not None:
+            layout_kwargs["cbar_gap"] = cbar_gap
 
-    panels = core.panel_grid(row_vals, columns, draw, fig=fig, spec=spec, layout=layout,
-                             projection=ccrs.SouthPolarStereo(), **layout_kwargs)
+    panels = core.panel_grid(
+        row_vals, columns, draw, fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, projection=ccrs.SouthPolarStereo(), **layout_kwargs
+    )
 
     core.label_cols(panels.axes, col_titles)
     core.label_rows(panels.axes, row_vals)
     core.tag_panels(panels.axes)
 
-    panels.extras["cbars"] = [
-        core.add_colorbar(panels.fig, panels.artists[0, 0],
-                          panels.layout.cbar_ax(panels.fig, 0, 2), raw_levels, raw_label),
-        core.add_colorbar(panels.fig, panels.artists[0, 3],
-                          panels.layout.cbar_ax(panels.fig, 3, 3),
+    if caxes is None and not caller_axes:
+        caxes = (
+            panels.layout.cbar_ax(panels.fig, 0, 2),
+            panels.layout.cbar_ax(panels.fig, 3, 3),
+        )
+    if caxes is not None:
+        caxes = np.asarray(caxes, dtype=object).ravel()
+        if caxes.size != 2:
+            raise ValueError("caxes must contain the raw and difference colorbar axes")
+        if any(cax is None for cax in caxes):
+            raise ValueError("caxes cannot contain None")
+    panels.extras["cbars"] = [] if caxes is None else [
+        core.add_colorbar(panels.fig, panels.artists[0, 0], caxes[0], raw_levels, raw_label),
+        core.add_colorbar(panels.fig, panels.artists[0, 3], caxes[1],
                           np.round(diff_levels, 1), diff_label),
     ]
-    if title and panels.layout.owns_figure:
+    if title and not caller_axes and panels.layout.owns_figure:
         core.add_suptitle(panels.fig, panels.layout, title)
 
     return panels
@@ -144,10 +181,11 @@ def quantile_summary(da_point, q_pairs=((0.01, 0.99), (0.1, 0.9), (0.25, 0.75)),
                      q_med=0.5, band_alphas=(0.08, 0.18, 0.32),
                      band_edge_widths=(0.0, 0.6, 1.0),
                      band_edge_styles=("-", ":", "--"),
-                     spread_styles=("-", "--", ":"),
-                     spread_alphas=(1.0, 0.75, 0.55),
-                     colors=None,
-                     fig=None, spec=None, layout=None, **layout_kwargs):
+                      spread_styles=("-", "--", ":"),
+                      spread_alphas=(1.0, 0.75, 0.55),
+                      colors=None,
+                      fig=None, spec=None, layout=None, ax=None, axes=None,
+                      **layout_kwargs):
     """Per-season quantile spread over a nested plume, with a figure legend.
 
     The rows are different heights, which is a GridLayout row_heights argument
@@ -167,6 +205,9 @@ def quantile_summary(da_point, q_pairs=((0.01, 0.99), (0.1, 0.9), (0.25, 0.75)),
         Line styling for the spread panel, one entry per pair. Cycled if shorter.
     colors : dict or None
         Season -> colour. Defaults to constants.SEASON_COLORS.
+    ax, axes : matplotlib.axes.Axes or array-like, optional
+        Caller-owned panel axes. Use `axes` for this complete grid; `ax` is
+        the one-panel shorthand in figure functions that produce one panel.
     fig, spec, layout, **layout_kwargs
         Standard figure-function arguments; see core.open_layout.
 
@@ -214,7 +255,7 @@ def quantile_summary(da_point, q_pairs=((0.01, 0.99), (0.1, 0.9), (0.25, 0.75)),
     layout_kwargs.setdefault("bottom", 0.85)
     panels = core.panel_grid(["spread", "plume"], seasons, draw,
                              fig=fig, spec=spec, layout=layout, sharex=True,
-                             **layout_kwargs)
+                             ax=ax, axes=axes, **layout_kwargs)
 
     handles = (panels.axes[1, 0].get_legend_handles_labels()[0]
                + timeseries.plume_handles(q_pairs, band_alphas))
@@ -248,7 +289,8 @@ def _style_buildup_ax(ax, ylim, baseline=0.0, xlim=(1850, 2014),
 @plot("figure")
 def tas_buildup_figure(tas_by_forcing, revealed, ylim, order=None, fade_earlier=True,
                        baseline=0.0, xlim=(1850, 2014), frame_size=(9, 5),
-                       fig=None, spec=None, layout=None, **layout_kwargs):
+                       fig=None, spec=None, layout=None, ax=None, axes=None,
+                       **layout_kwargs):
     """One frame of the forcing buildup: an ordinary figure function.
 
     Split out from the frame loop so a single frame can be inspected, tweaked
@@ -272,6 +314,9 @@ def tas_buildup_figure(tas_by_forcing, revealed, ylim, order=None, fade_earlier=
         Shared x limits.
     frame_size : (float, float)
         Overall frame size in inches; the panel is sized to fit inside it.
+    ax, axes : matplotlib.axes.Axes or array-like, optional
+        Caller-owned panel axes. Use `ax` for this single-panel result; their
+        figure is inferred when omitted.
     fig, spec, layout, **layout_kwargs
         Standard figure-function arguments; see core.open_layout.
 
@@ -294,7 +339,7 @@ def tas_buildup_figure(tas_by_forcing, revealed, ylim, order=None, fade_earlier=
         return artists
 
     panels = core.panel_grid([None], [None], draw, fig=fig, spec=spec,
-                             layout=layout, **layout_kwargs)
+                             layout=layout, ax=ax, axes=axes, **layout_kwargs)
     panels.extras["legend"] = core.reveal_legend(
         panels.fig, order, FORCING_COLORS, FORCING_LEGEND_LABELS, revealed,
         ncols=3, loc="upper center", bbox_to_anchor=(0.5, 1.0),
