@@ -19,20 +19,22 @@ def test_polar_grid_uses_caller_axes_and_cax(monkeypatch):
         dims=("period", "lat", "lon"),
         coords={"period": ["early", "late"], "lat": [-80, -70], "lon": [0, 180]},
     )
-    fig, axes = plt.subplots(
-        1, 2, squeeze=False,
-        subplot_kw={"projection": cartopy.SouthPolarStereo()},
-    )
-    cax = fig.add_axes((0.25, 0.05, 0.5, 0.03))
+    fig = plt.figure()
+    grid = fig.add_gridspec(2, 2, height_ratios=[1, .06])
+    axes = np.array([[
+        fig.add_subplot(grid[0, col], projection=cartopy.SouthPolarStereo())
+        for col in range(2)
+    ]], dtype=object)
+    cax = fig.add_subplot(grid[1, :])
     seen = []
 
-    def draw(ax, da, *args, **kwargs):
+    def draw_contour(ax, da, *args, **kwargs):
         seen.append((ax, da.period.item()))
         mappable = cm.ScalarMappable(norm=colors.Normalize(-3, 3), cmap="RdBu_r")
         mappable.set_array([-3, 3])
         return mappable
 
-    monkeypatch.setattr(maps, "draw_polar_contour", draw)
+    monkeypatch.setattr(maps, "draw_polar_contour", draw_contour)
     try:
         panels = maps.polar_grid(
             field, col_dim="period", axes=axes, cax=cax, tag=False
@@ -54,12 +56,12 @@ def test_polar_grid_exposes_automatic_colorbar_geometry(monkeypatch):
         coords={"period": ["early", "late"], "lat": [-80, -70], "lon": [0, 180]},
     )
 
-    def draw(*args, **kwargs):
+    def draw_contour(*args, **kwargs):
         mappable = cm.ScalarMappable(norm=colors.Normalize(-3, 3), cmap="RdBu_r")
         mappable.set_array([-3, 3])
         return mappable
 
-    monkeypatch.setattr(maps, "draw_polar_contour", draw)
+    monkeypatch.setattr(maps, "draw_polar_contour", draw_contour)
     panels = maps.polar_grid(
         field, col_dim="period", cbar_height=0.30, cbar_gap=0.20, tag=False
     )
@@ -107,12 +109,12 @@ def test_polar_grid_rejects_cax_from_another_figure(monkeypatch):
     )
     foreign_fig, foreign_cax = plt.subplots()
 
-    def draw(*args, **kwargs):
+    def draw_contour(*args, **kwargs):
         mappable = cm.ScalarMappable(norm=colors.Normalize(-3, 3), cmap="RdBu_r")
         mappable.set_array([-3, 3])
         return mappable
 
-    monkeypatch.setattr(maps, "draw_polar_contour", draw)
+    monkeypatch.setattr(maps, "draw_polar_contour", draw_contour)
     try:
         with pytest.raises(ValueError, match="cax must belong to fig"):
             maps.polar_grid(field, col_dim="period", axes=axes, cax=foreign_cax)
@@ -136,7 +138,8 @@ def test_polar_grid_rejects_colorbar_geometry_for_caller_owned_targets(target):
         kwargs = {"axes": axes}
     else:
         fig = plt.figure()
-        kwargs = {"fig": fig, "cax": fig.add_axes((0.25, 0.05, 0.5, 0.03))}
+        grid = fig.add_gridspec(1, 1)
+        kwargs = {"fig": fig, "cax": fig.add_subplot(grid[0, 0])}
 
     try:
         with pytest.raises(ValueError, match="caller-owned cax"):
@@ -167,13 +170,15 @@ def _mappable(*args, **kwargs):
 
 def test_quantile_matrix_uses_caller_owned_colorbar_axes(monkeypatch):
     field = _quantile_field()
-    fig, axes = plt.subplots(
-        1, 4, squeeze=False,
-        subplot_kw={"projection": cartopy.SouthPolarStereo()},
-    )
+    fig = plt.figure()
+    grid = fig.add_gridspec(2, 4, height_ratios=[1, .06])
+    axes = np.array([[
+        fig.add_subplot(grid[0, col], projection=cartopy.SouthPolarStereo())
+        for col in range(4)
+    ]], dtype=object)
     caxes = (
-        fig.add_axes((0.10, 0.05, 0.50, 0.03)),
-        fig.add_axes((0.70, 0.05, 0.20, 0.03)),
+        fig.add_subplot(grid[1, :3]),
+        fig.add_subplot(grid[1, 3]),
     )
     monkeypatch.setattr(figures.maps, "draw_polar_contour", _mappable)
     axes_count = len(fig.axes)

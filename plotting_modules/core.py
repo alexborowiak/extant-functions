@@ -1,36 +1,13 @@
-"""Figure structure, and the contract every plotting function in this package obeys.
+"""Shared panel-grid and layout helpers.
 
-There are exactly two kinds of function here, and you can tell which from the
-first argument:
+``panel_grid`` creates axes and calls a drawing function once for every row
+and column key. Figure functions in the package use it to turn data
+coordinates (such as season and period) into panels.
 
-  draw_*(ax, data, ...) -> artists
-      A panel function. Draws into an axes you already have. Never creates a
-      figure, never sets limits or titles that belong to the grid around it.
-
-  <name>(data, ..., ax=None, axes=None, fig=None, spec=None, layout=None,
-         **layout_kwargs) -> Panels
-      A figure function. Builds a grid of panels. Four ways to call it:
-        no keywords          it sizes and creates its own figure
-        layout=GridLayout()  it uses the layout you built
-        spec=gs[0, 1]        it subdivides that cell of a parent grid
-        ax= / axes=          it draws into axes you already made
-      All four return Panels, and every figure function has the same body:
-      resolve the layout, run panel_grid, decorate, return.
-
-Which of the three you used is the only thing that varies downstream, and it is
-handled by the Layout objects rather than by branches in each function:
-
-  GridLayout    owns a whole canvas. Sized in inches, so panels and colorbars
-                come out identical however many rows and columns there are.
-  NestedLayout  owns one cell of someone else's grid. Proportional, because
-                inch-exactness is a property of owning the canvas.
-
-Both expose make_gridspec, cbar_ax and title_y, so a figure function never has
-to ask which one it got.
-
-Colorbar geometry belongs to the layout: a new GridLayout uses
-`cbar_height` and `cbar_gap` in inches; a nested layout uses its relative
-`cbar_frac`; caller-owned axes use a caller-owned `cax`.
+``GridLayout`` owns a whole figure and uses inches for panel and colorbar
+sizes. ``NestedLayout`` fills one cell of a parent GridSpec and uses relative
+sizes. Automatic colorbars always occupy a reserved GridSpec row; a caller who
+supplies axes owns the colorbar axes too.
 """
 
 import string
@@ -60,7 +37,6 @@ CBAR_GAP = 0.45          # gap between the bottom row and the bars
 CBAR_HEIGHT = 0.16       # bar thickness
 CBAR_TICK_SPACE = 0.45   # room below the bars for tick labels
 CBAR_LABEL_SPACE = 0.24  # extra room below that for the colorbar axis label
-CBAR_INSET = 0.30        # horizontal inset so bars stop short of the panel edges
 
 
 # --------------------------------------------------------------------------
@@ -152,6 +128,7 @@ class GridLayout:
         self.grid_h = sum(self.row_heights) + (n_rows - 1) * hspace
         self.fig_w = self.left_in + self.grid_w + self.right_in
         self.fig_h = self.top_in + self.grid_h + self.bottom_in
+        self._cbar_gs = None
 
     def fx(self, inches):
         """Convert a horizontal length in inches to a figure fraction."""
@@ -165,8 +142,19 @@ class GridLayout:
         """Return a figure sized so each panel is exactly its requested size."""
         return plt.figure(figsize=(self.fig_w, self.fig_h), **kwargs)
 
-    def make_gridspec(self, fig):
-        """Return a GridSpec pinned to absolute figure-edge offsets."""
+    def _panel_gridspec(self, fig, subplot_spec=None):
+        """Build the GridSpec containing the actual panels."""
+        kwargs = dict(
+            width_ratios=self.col_widths,
+            height_ratios=self.row_heights,
+            # Matplotlib measures these against the mean panel size.
+            wspace=self.wspace / np.mean(self.col_widths),
+            hspace=self.hspace / np.mean(self.row_heights),
+        )
+        if subplot_spec is not None:
+            return GridSpecFromSubplotSpec(
+                self.n_rows, self.n_cols, subplot_spec=subplot_spec, **kwargs
+            )
         return GridSpec(
             self.n_rows,
             self.n_cols,
@@ -175,36 +163,47 @@ class GridLayout:
             right=self.fx(self.left_in + self.grid_w),
             bottom=self.fy(self.bottom_in),
             top=self.fy(self.bottom_in + self.grid_h),
-            width_ratios=self.col_widths,
-            height_ratios=self.row_heights,
-            # matplotlib measures these against the mean panel size, so the
-            # conversion has to use the mean too, not panel_w / panel_h.
-            wspace=self.wspace / np.mean(self.col_widths),
-            hspace=self.hspace / np.mean(self.row_heights),
+            **kwargs,
         )
 
-    def col_left(self, col):
-        """Left edge of a column, in inches from the figure edge."""
-        return self.left_in + sum(self.col_widths[:col]) + col * self.wspace
+    def make_gridspec(self, fig):
+        """Return panel slots and reserve automatic colorbars in GridSpec."""
+        self._cbar_gs = None
+        if not self.has_cbar:
+            return self._panel_gridspec(fig)
 
-    def cbar_ax(self, fig, first_col=0, last_col=None, inset=CBAR_INSET, height=None):
-        """Colorbar axes spanning columns first_col..last_col inclusive.
+        # The outer grid gives the panel block and colorbar row independent
+        # heights and their own gap. GridSpec expresses the gap as a fraction
+        # of its mean row height, hence the conversion from inches here.
+        cbar_hspace = 2 * self.cbar_gap / (self.grid_h + self.cbar_height)
+        outer = GridSpec(
+            2,
+            1,
+            figure=fig,
+            left=self.fx(self.left_in),
+            right=self.fx(self.left_in + self.grid_w),
+            bottom=self.fy(self.cbar_y0),
+            top=self.fy(self.bottom_in + self.grid_h),
+            height_ratios=(self.grid_h, self.cbar_height),
+            hspace=cbar_hspace,
+        )
+        self._cbar_gs = GridSpecFromSubplotSpec(
+            1,
+            self.n_cols,
+            subplot_spec=outer[1, 0],
+            width_ratios=self.col_widths,
+            wspace=self.wspace / np.mean(self.col_widths),
+        )
+        return self._panel_gridspec(fig, outer[0, 0])
 
-        Aligning to whole columns is what makes two bars in one figure line up
-        with the panels above them. Set `cbar_height` when building the layout;
-        a different per-call `height` would not reserve matching space.
-        """
+    def cbar_ax(self, fig, first_col=0, last_col=None):
+        """Colorbar axes spanning complete panel columns in the reserved row."""
         if not self.has_cbar:
             raise ValueError("layout was built with has_cbar=False")
-        if height is not None and height != self.cbar_height:
-            raise ValueError("set cbar_height when constructing GridLayout")
         last_col = self.n_cols - 1 if last_col is None else last_col
-        height = self.cbar_height
-        x0 = self.col_left(first_col) + inset
-        x1 = self.col_left(last_col) + self.col_widths[last_col] - inset
-        return fig.add_axes(
-            [self.fx(x0), self.fy(self.cbar_y0), self.fx(x1 - x0), self.fy(height)]
-        )
+        if self._cbar_gs is None:
+            raise RuntimeError("call make_gridspec before requesting a colorbar axes")
+        return fig.add_subplot(self._cbar_gs[0, first_col : last_col + 1])
 
     def title_y(self, fig=None, pad=0.18):
         """Figure-fraction y for a top-aligned title."""
@@ -278,16 +277,12 @@ class NestedLayout:
         )
         return self._gs
 
-    def col_left(self, col):
-        """Undefined for a nested layout; positions come from the parent."""
-        raise TypeError("nested layouts do not expose absolute column positions")
-
-    def cbar_ax(self, fig, first_col=0, last_col=None, **ignored):
+    def cbar_ax(self, fig, first_col=0, last_col=None):
         """Colorbar axes in the reserved bottom row of the sub-gridspec."""
         if not self.has_cbar:
             raise ValueError("layout was built with has_cbar=False")
-        if "height" in ignored:
-            raise ValueError("nested layouts use cbar_frac instead of height")
+        if self._gs is None:
+            raise RuntimeError("call make_gridspec before requesting a colorbar axes")
         last_col = self.n_cols - 1 if last_col is None else last_col
         return fig.add_subplot(self._gs[-1, first_col : last_col + 1])
 
@@ -490,6 +485,25 @@ def _panel_axes(axes, n_rows, n_cols):
     return axes.reshape(n_rows, n_cols)
 
 
+def _grid_keys(keys, axis):
+    """Turn an integer grid size or an iterable of per-panel keys into a list."""
+    if isinstance(keys, (int, np.integer)) and not isinstance(keys, bool):
+        if keys < 1:
+            raise ValueError(f"{axis}_keys must be a positive integer")
+        return list(range(keys))
+    if isinstance(keys, str):
+        raise TypeError(f"{axis}_keys must be an iterable; wrap one string in a list")
+    try:
+        keys = list(keys)
+    except TypeError as error:
+        raise TypeError(
+            f"{axis}_keys must be a positive integer or an iterable of keys"
+        ) from error
+    if not keys:
+        raise ValueError(f"{axis}_keys cannot be empty")
+    return keys
+
+
 def _share_axes(axes, sharex, sharey):
     """Apply the same sharing groups to caller-owned axes as new axes."""
     x_refs, y_refs = {}, {}
@@ -512,9 +526,9 @@ def _share_axes(axes, sharex, sharey):
 
 
 def panel_grid(
-    row_vals,
-    col_vals,
-    draw,
+    row_keys,
+    col_keys,
+    draw_panel,
     fig=None,
     gs=None,
     axes=None,
@@ -526,26 +540,53 @@ def panel_grid(
     ax=None,
     **layout_kwargs,
 ):
-    """Draw one panel per (row value, column value) pair.
+    """Create a panel grid and call ``draw_panel`` once for every cell.
 
-    The one loop every grid figure goes through. It owns the iteration and
-    nothing else: `draw` decides what a panel contains, and the label and tag
-    helpers below decide what it is annotated with.
+    This is a data-facet helper, not a title helper. ``row_keys`` and
+    ``col_keys`` determine the grid shape and are handed unchanged to
+    ``draw_panel``. For example, a grid keyed by data coordinates calls::
+
+        draw_panel(axes[row_index, col_index],
+                   row_keys[row_index], col_keys[col_index])
+
+    It does not label panels. Call ``label_rows`` and ``label_cols`` after
+    drawing when those keys should also be display labels.
+
+    Examples
+    --------
+    An ordinary indexed 3-by-2 grid::
+
+        def draw_panel(ax, row, col):
+            ax.text(.5, .5, f"row {row}, column {col}", ha="center")
+
+        panels = panel_grid(3, 2, draw_panel)
+
+    A data-coordinate grid::
+
+        def draw_panel(ax, kind, period):
+            return field.sel(kind=kind, period=period).plot(ax=ax)
+
+        panels = panel_grid(["signal", "noise", "sn"], periods, draw_panel)
 
     Parameters
     ----------
-    row_vals, col_vals : sequence
-        Panel coordinates. A single-element sequence such as ``[None]`` gives
-        one row or column. Values are passed to `draw` unchanged, so they can
-        be dimension values, dict keys, or column descriptions.
-    draw : callable
-        ``draw(ax, row_val, col_val)``. Its return value is collected, which is
-        how a mappable gets back out for a colorbar.
-    fig, gs, axes, spec, layout, projection, sharex, sharey, ax, **layout_kwargs
-        Ways in, most specific first: `ax` is a one-panel shorthand and
-        `axes` uses caller-owned axes in row-major order. Their figure is
-        inferred when `fig` is omitted. `gs` builds axes on it; otherwise
-        `open_layout` resolves the rest.
+    row_keys, col_keys : int or iterable
+        A positive integer makes indexed keys ``range(n)``. Otherwise every
+        item makes one row or column and is passed unchanged to
+        ``draw_panel``. These are not display labels. Use ``[None]`` for a
+        single row or column with no key.
+    draw_panel : callable
+        Called as ``draw_panel(ax, row_key, col_key)``. Draw into ``ax`` and
+        return an artist/mappable to retain it in ``Panels.artists``; return
+        ``None`` when nothing needs retaining.
+    ax, axes : matplotlib.axes.Axes or array-like, optional
+        Existing target axes. ``ax`` is the one-panel shortcut; ``axes`` must
+        have one axis per row/column key in row-major order. Their figure is
+        inferred when ``fig`` is omitted.
+    fig, gs, spec, layout, **layout_kwargs
+        Layout inputs used only when this function creates the axes. ``gs``
+        needs its owning ``fig``; otherwise ``open_layout`` resolves a whole
+        figure, a nested spec, or a supplied layout.
     projection, sharex, sharey
         `projection` is used when this call builds axes. Sharing is applied
         whether axes are created here or supplied by the caller.
@@ -554,7 +595,11 @@ def panel_grid(
     -------
     Panels
     """
-    n_rows, n_cols = len(row_vals), len(col_vals)
+    row_keys = _grid_keys(row_keys, "row")
+    col_keys = _grid_keys(col_keys, "col")
+    if not callable(draw_panel):
+        raise TypeError("draw_panel must be callable")
+    n_rows, n_cols = len(row_keys), len(col_keys)
 
     if ax is not None:
         if axes is not None:
@@ -583,9 +628,9 @@ def panel_grid(
         _share_axes(axes, sharex, sharey)
 
     artists = np.empty((n_rows, n_cols), dtype=object)
-    for r, row_val in enumerate(row_vals):
-        for c, col_val in enumerate(col_vals):
-            artists[r, c] = draw(axes[r, c], row_val, col_val)
+    for r, row_key in enumerate(row_keys):
+        for c, col_key in enumerate(col_keys):
+            artists[r, c] = draw_panel(axes[r, c], row_key, col_key)
 
     return Panels(fig=fig, axes=axes, layout=layout, artists=artists)
 

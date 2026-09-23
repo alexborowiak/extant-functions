@@ -31,7 +31,27 @@ def test_panel_grid_infers_figure_and_reshapes_a_vertical_axes_vector():
         plt.close(fig)
 
 
-def test_panel_grid_keeps_axes_in_its_legacy_positional_slot():
+def test_panel_grid_accepts_integer_grid_sizes_and_descriptive_keywords():
+    fig, axes = plt.subplots(2, 3, squeeze=False)
+    seen = []
+
+    try:
+        panels = core.panel_grid(
+            row_keys=2,
+            col_keys=3,
+            draw_panel=lambda ax, row, col: seen.append((ax, row, col)),
+            axes=axes,
+        )
+
+        assert panels.axes.shape == (2, 3)
+        assert [(row, col) for _, row, col in seen] == [
+            (0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)
+        ]
+    finally:
+        plt.close(fig)
+
+
+def test_panel_grid_keeps_caller_axes_in_its_positional_slot():
     fig, ax = plt.subplots()
 
     try:
@@ -62,11 +82,22 @@ def test_nested_layout_uses_relative_colorbar_height():
         plt.close(fig)
 
 
-def test_grid_layout_rejects_an_unreserved_colorbar_height():
-    layout = core.GridLayout(1, 1, has_cbar=True)
+def test_grid_layout_keeps_automatic_colorbars_in_gridspec():
+    layout = core.GridLayout(1, 2, has_cbar=True, cbar_height=0.30, cbar_gap=0.20)
+    fig = layout.make_figure()
 
-    with pytest.raises(ValueError, match="cbar_height"):
-        layout.cbar_ax(object(), height=0.30)
+    try:
+        panels = layout.make_gridspec(fig)
+        panel = fig.add_subplot(panels[0, 0])
+        cax = layout.cbar_ax(fig)
+
+        assert cax.get_subplotspec() is not None
+        assert cax.get_position().height == pytest.approx(layout.fy(0.30))
+        assert panel.get_position().y0 - cax.get_position().y1 == pytest.approx(
+            layout.fy(0.20)
+        )
+    finally:
+        plt.close(fig)
 
 
 @pytest.mark.parametrize(

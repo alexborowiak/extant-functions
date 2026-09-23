@@ -2,15 +2,13 @@
 
 Layers:
   Primitive   setup_polar_ax, draw_polar_contour — draw on one axes.
-  Selection   select, panel_values, panel, prepare — turn a DataArray plus
+  Selection   select, panel_keys, select_panel, prepare — turn a DataArray plus
               sel/row/col into the coordinates core.panel_grid iterates over.
   Figure      polar_grid — DataArray in, figure out.
 
-For mixed figures, pass caller-owned `axes` to polar_grid. Use draw_polar only
-when the panels need a custom callback.
+For mixed figures, pass caller-owned `axes` to polar_grid. For a custom map,
+call draw_polar_contour from your own per-panel draw function.
 """
-
-from functools import partial
 
 import numpy as np
 import matplotlib.path as mpath
@@ -18,7 +16,6 @@ import cartopy.crs as ccrs
 from cartopy.util import add_cyclic_point
 
 from .core import (
-    GridLayout,
     add_colorbar,
     add_suptitle,
     label_cols,
@@ -132,18 +129,18 @@ def select(da, sel):
             da = da.sel({dim: value})
     return da
 
-def panel_values(da, dim):
-    """Values of `dim`, or [None] when there is no dimension to map."""
+def panel_keys(da, dim):
+    """Keys for panels along `dim`, or [None] when it is not a grid dimension."""
     if dim is None or dim not in da.dims:
         return [None]
     return list(np.atleast_1d(da[dim].values))
 
-def panel(da, dim, value):
-    """One panel's slice; a None value means nothing to select."""
-    return da if value is None else da.sel({dim: value})
+def select_panel(da, dim, key):
+    """Select one panel key; ``None`` means that dimension is not faceted."""
+    return da if key is None else da.sel({dim: key})
 
 def prepare(da, sel=None, row_dim=None, col_dim=None, lat_name="lat", lon_name="lon"):
-    """Apply sel, drop degenerate dims, return (da, row_vals, col_vals).
+    """Apply sel, drop degenerate dims, return (da, row_keys, col_keys).
 
     Raises if any dimension is left neither collapsed by `sel` nor mapped to
     rows, columns, latitude or longitude — silently plotting the first element
@@ -161,28 +158,7 @@ def prepare(da, sel=None, row_dim=None, col_dim=None, lat_name="lat", lon_name="
             f"unmapped dimensions {unmapped}; pass them in sel, row_dim or col_dim"
         )
 
-    return da, panel_values(da, row_dim), panel_values(da, col_dim)
-
-def draw_polar(
-    ax,
-    row_val,
-    col_val,
-    da=None,
-    row_dim=None,
-    col_dim=None,
-    levels=None,
-    cmap="RdBu_r",
-    lat_name="lat",
-    lon_name="lon",
-):
-    """A `panel_grid` callback that contours one slice of `da`.
-
-    Bind the trailing arguments with functools.partial and hand the result to
-    `panel_grid`; see `polar_grid` for the usual case.
-    """
-    da_panel = panel(panel(da, row_dim, row_val), col_dim, col_val)
-    return draw_polar_contour(ax, da_panel, levels, cmap, lat_name, lon_name)
-
+    return da, panel_keys(da, row_dim), panel_keys(da, col_dim)
 
 # --------------------------------------------------------------------------
 # Figure
@@ -234,8 +210,9 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
         Targets for a multi-panel grid, in row-major order. They must already
         use the desired Cartopy projection.
     cax : matplotlib.axes.Axes or None
-        Colorbar axes. A colorbar is created automatically only when this
-        function creates its panel axes; pass `cax` for caller-owned axes.
+        Caller-owned colorbar axes. A colorbar is created automatically in a
+        reserved GridSpec row only when this function creates its panel axes.
+        For a composed figure, create this with ``fig.add_subplot(grid[...])``.
     cbar_height, cbar_gap : float or None
         Thickness and gap above an automatic colorbar, in inches. These apply
         when this function creates a `GridLayout`; nested layouts use
@@ -249,30 +226,38 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
 
     Examples
     --------
-    Put three fields into rows of one caller-owned figure::
+    Put signal, noise and S/N into rows of one caller-owned GridSpec::
 
         import matplotlib.pyplot as plt
+        import numpy as np
         import xarray as xr
         import cartopy.crs as ccrs
 
-        fig, axes = plt.subplots(
-            3, n_periods, squeeze=False,
-            subplot_kw={"projection": ccrs.SouthPolarStereo()},
-        )
+        fig = plt.figure()
+        grid = fig.add_gridspec(4, n_periods, height_ratios=[1, 1, 1, .06])
+        axes = np.array([
+            [fig.add_subplot(grid[row, col], projection=ccrs.SouthPolarStereo())
+             for col in range(n_periods)]
+            for row in range(3)
+        ])
+        cax = fig.add_subplot(grid[3, :])
         fields = xr.concat(
             (signal, noise, sn),
             dim=xr.IndexVariable("kind", ("signal", "noise", "sn")),
         )
-        polar_grid(fields, row_dim="kind", col_dim="period", axes=axes, tag=False)
+        polar_grid(
+            fields, row_dim="kind", col_dim="period", axes=axes, cax=cax,
+            tag=False,
+        )
 
-    Add a colorbar without changing the map layout by passing a dedicated
-    `cax` to the call that should own it.
+    The figure owns every position in this example; ``polar_grid`` only draws
+    into the supplied axes.
     """
-    da, row_vals, col_vals = prepare(da, sel, row_dim, col_dim, lat_name, lon_name)
+    da, row_keys, col_keys = prepare(da, sel, row_dim, col_dim, lat_name, lon_name)
     fmt = label_fmt or {}
     caller_axes = ax is not None or axes is not None
 
-    layout_kwargs.setdefault("row_labels", any(v is not None for v in row_vals))
+    layout_kwargs.setdefault("row_labels", any(key is not None for key in row_keys))
     layout_kwargs.setdefault("has_title", title is not None)
     layout_kwargs.setdefault("has_cbar", cax is None)
     layout_kwargs.setdefault("has_cbar_label", cbar_label is not None and cax is None)
@@ -289,23 +274,27 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
         if cbar_gap is not None:
             layout_kwargs["cbar_gap"] = cbar_gap
 
+    def draw_panel(ax, row_key, col_key):
+        field = select_panel(da, row_dim, row_key)
+        field = select_panel(field, col_dim, col_key)
+        return draw_polar_contour(ax, field, levels, cmap, lat_name, lon_name)
+
     panels = panel_grid(
-        row_vals,
-        col_vals,
-        partial(draw_polar, da=da, row_dim=row_dim, col_dim=col_dim,
-                levels=levels, cmap=cmap, lat_name=lat_name, lon_name=lon_name),
+        row_keys,
+        col_keys,
+        draw_panel,
         fig=fig, spec=spec, layout=layout, ax=ax, axes=axes,
         projection=projection or ccrs.SouthPolarStereo(),
         **layout_kwargs,
     )
 
-    label_cols(panels.axes, col_vals, fmt.get(col_dim, str))
-    label_rows(panels.axes, row_vals, fmt.get(row_dim, str))
+    label_cols(panels.axes, col_keys, fmt.get(col_dim, str))
+    label_rows(panels.axes, row_keys, fmt.get(row_dim, str))
     if tag:
         tag_panels(panels.axes)
 
     if cax is None and not caller_axes:
-        cax = panels.layout.cbar_ax(panels.fig, 0, len(col_vals) - 1)
+        cax = panels.layout.cbar_ax(panels.fig, 0, len(col_keys) - 1)
     if cax is not None:
         panels.extras["cbar"] = add_colorbar(
             panels.fig,

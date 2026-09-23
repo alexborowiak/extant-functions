@@ -365,12 +365,12 @@ def stack_grid(das, dim="season", hlines=(), title=None, x="time",
     """
     if not isinstance(das, dict):
         das = {das.name: das}
-    values = list(next(iter(das.values()))[dim].values)
+    row_keys = list(next(iter(das.values()))[dim].values)
 
-    def draw(ax, value, _):
+    def draw_panel(ax, row_key, _):
         artists = []
         for label, da in das.items():
-            artists += da.sel({dim: value}).plot(ax=ax, label=label, linewidth=1.6)
+            artists += da.sel({dim: row_key}).plot(ax=ax, label=label, linewidth=1.6)
         for y, colour in hlines:
             ax.axhline(y, color=colour, linestyle="--", linewidth=1.4, alpha=0.8)
         ax.set_title(None)
@@ -378,16 +378,17 @@ def stack_grid(das, dim="season", hlines=(), title=None, x="time",
         ax.set_ylabel(None)
         ax.grid(True, linestyle="--", color="grey", alpha=0.6)
         ax.tick_params(labelsize=12, labelbottom=False)
-        ax.annotate(str(value), xy=(0.015, 0.78), xycoords="axes fraction",
+        ax.annotate(str(row_key), xy=(0.015, 0.78), xycoords="axes fraction",
                     fontsize=15, fontweight="bold")
         return artists
 
     layout_kwargs.setdefault("hspace", 0.0)
     layout_kwargs.setdefault("panel_h", 1.4)
     layout_kwargs.setdefault("panel_w", 7.0)
-    panels = core.panel_grid(values, [None], draw, fig=fig, spec=spec,
-                             layout=layout, ax=ax, axes=axes, sharex=True,
-                             **layout_kwargs)
+    panels = core.panel_grid(
+        row_keys, [None], draw_panel, fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, sharex=True, **layout_kwargs,
+    )
 
     column = panels.axes[:, 0]
     ylims = [ax.get_ylim() for ax in column]

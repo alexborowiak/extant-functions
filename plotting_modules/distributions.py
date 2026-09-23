@@ -51,14 +51,16 @@ PANEL_KWARGS = dict(panel_w=1.8, panel_h=1.6, wspace=0.08, hspace=0.10,
                     left=0.75, bottom=0.55)
 
 
-def _grid(rows, cols, draw, xlabel, col_fmt=str, **kwargs):
+def _grid(row_keys, col_keys, draw_panel, xlabel, col_fmt=str, **kwargs):
     """Shared body of every distribution grid: panels, hide inner, label, return."""
     for key, value in PANEL_KWARGS.items():
         kwargs.setdefault(key, value)
-    panels = core.panel_grid(rows, cols, draw, sharex=True, sharey=True, **kwargs)
+    panels = core.panel_grid(
+        row_keys, col_keys, draw_panel, sharex=True, sharey=True, **kwargs
+    )
     core.hide_inner_labels(panels.axes)
-    core.label_cols(panels.axes, cols, col_fmt, pad=6, fontweight="normal")
-    core.label_rows(panels.axes, rows, rotate=True, fontweight="normal")
+    core.label_cols(panels.axes, col_keys, col_fmt, pad=6, fontweight="normal")
+    core.label_rows(panels.axes, row_keys, rotate=True, fontweight="normal")
     for ax in panels.axes[-1, :]:
         ax.set_xlabel(xlabel)
     return panels
@@ -89,7 +91,7 @@ def kde_grid(kde, periods, colors, variable="tas", fig=None, spec=None, layout=N
     -------
     core.Panels
     """
-    def draw(ax, exp, period):
+    def draw_panel(ax, exp, period):
         da = kde[exp][variable].sel(year=period)
         if "year" in da.dims:
             da = da.mean("year")
@@ -101,7 +103,7 @@ def kde_grid(kde, periods, colors, variable="tas", fig=None, spec=None, layout=N
         return line
 
     return _grid(
-        list(kde), periods, draw, variable, col_fmt=period_label, fig=fig,
+        list(kde), periods, draw_panel, variable, col_fmt=period_label, fig=fig,
         spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
     )
 
@@ -123,7 +125,7 @@ def kde_overlay(kde, periods, colors, variable="tas", fig=None, spec=None, layou
     """
     experiments = list(kde)
 
-    def draw(ax, _, period):
+    def draw_panel(ax, _, period):
         lines = []
         for exp in experiments:
             da = kde[exp][variable].sel(year=period)
@@ -136,7 +138,7 @@ def kde_overlay(kde, periods, colors, variable="tas", fig=None, spec=None, layou
         return lines
 
     panels = _grid(
-        [None], periods, draw, variable, col_fmt=period_label, fig=fig,
+        [None], periods, draw_panel, variable, col_fmt=period_label, fig=fig,
         spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
     )
     panels.axes[0, 0].set_ylabel("Density")
@@ -163,7 +165,7 @@ def hist_grid(point, periods, colors, variable="tas", n_bins=20, fig=None,
     experiments = list(point)
     bins = hist_bins(point, periods, experiments, variable, n_bins)
 
-    def draw(ax, exp, period):
+    def draw_panel(ax, exp, period):
         out = point.sel(year=period)[exp][variable].plot.hist(
             ax=ax, bins=bins, color=colors[exp], alpha=0.5
         )
@@ -175,7 +177,7 @@ def hist_grid(point, periods, colors, variable="tas", n_bins=20, fig=None,
         return out
 
     panels = _grid(
-        experiments, periods, draw, variable, col_fmt=period_label, fig=fig,
+        experiments, periods, draw_panel, variable, col_fmt=period_label, fig=fig,
         spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
     )
     panels.extras["bins"] = bins
