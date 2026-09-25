@@ -198,7 +198,42 @@ def print_plots(*modules, level=None, width=100):
     """Print `plot_index` to stdout."""
     print(plot_index(*modules, level=level, width=width))
 
+import matplotlib.colors as mcolors
 
+
+def make_diverging_colormap(bounds, purple_start=-100, red_start=100, white_centre=True):
+    bounds = np.asarray(bounds)
+    zero_idx = np.where(bounds == 0)[0][0]
+
+    n_neg = zero_idx
+    n_pos = len(bounds) - zero_idx - 1
+
+    neg_pos = abs(purple_start) / abs(bounds[0])
+    pos_pos = red_start / bounds[-1]
+
+    neg_cmap = mcolors.LinearSegmentedColormap.from_list(
+        "negative",
+        [(0, "#54278f"), (1 - neg_pos, "#2171b5"), (1, "#c6dbef")])
+
+    pos_cmap = mcolors.LinearSegmentedColormap.from_list(
+        "positive",
+        [(0, "#fff7bc"), (pos_pos, "#fe9929"), (1, "#7f0000")])
+
+    neg_colors = neg_cmap(np.linspace(0, 1, n_neg))
+    pos_colors = pos_cmap(np.linspace(0, 1, n_pos))
+
+    if white_centre:
+        neg_colors[-1] = mcolors.to_rgba("white")
+        pos_colors[0] = mcolors.to_rgba("white")
+
+    colors = np.vstack([neg_colors, pos_colors])
+
+    cmap = mcolors.ListedColormap(colors)
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    return cmap, norm
+
+    
 # --------------------------------------------------------------------------
 # Small shared helpers, used by more than one drawing module
 # --------------------------------------------------------------------------
@@ -261,3 +296,7 @@ def save_frame(fig, directory, index, name, close=True, facecolor="white", **kwa
     if close:
         plt.close(fig)
     return path
+
+
+
+

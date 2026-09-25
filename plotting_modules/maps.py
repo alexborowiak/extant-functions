@@ -64,9 +64,16 @@ def setup_polar_ax(ax, extent=DEFAULT_EXTENT):
 
 @plot("axes")
 def draw_polar_contour(
-    ax, da, levels, cmap="RdBu_r", lat_name="lat", lon_name="lon", extent=DEFAULT_EXTENT
+    ax,
+    da,
+    levels,
+    cmap="RdBu_r",
+    norm=None,
+    lat_name="lat",
+    lon_name="lon",
+    extent=DEFAULT_EXTENT,
 ):
-    """Filled and line contours of a 2-D field on a polar axes.
+    """Filled and line contours of a 2-D field on polar axes.
 
     Parameters
     ----------
@@ -76,17 +83,19 @@ def draw_polar_contour(
         Field with latitude and longitude dimensions.
     levels : array_like
         Contour levels.
-    cmap : str
-        Colormap name.
+    cmap : str or Colormap, default="RdBu_r"
+        Colormap for filled contours.
+    norm : matplotlib.colors.Normalize, optional
+        Normalisation used to map values to colours.
     lat_name, lon_name : str
-        Names of the latitude and longitude coordinates.
+        Latitude and longitude coordinate names.
     extent : sequence of float
         Passed to `setup_polar_ax`.
 
     Returns
     -------
     matplotlib.contour.QuadContourSet
-        The filled contour set, for use as a colorbar mappable.
+        Filled contour set for use as a colorbar mappable.
     """
     da = da.transpose(lat_name, lon_name)
     data_cyclic, lons_cyclic = add_cyclic_point(da.values, coord=da[lon_name].values)
@@ -99,8 +108,10 @@ def draw_polar_contour(
         transform=ccrs.PlateCarree(),
         levels=levels,
         cmap=cmap,
+        norm=norm,
         extend="both",
     )
+
     ax.contour(
         lons_cyclic,
         lats,
@@ -114,7 +125,6 @@ def draw_polar_contour(
 
     setup_polar_ax(ax, extent)
     return cf
-
 
 # --------------------------------------------------------------------------
 # Turning a DataArray into panel coordinates
@@ -166,7 +176,7 @@ def prepare(da, sel=None, row_dim=None, col_dim=None, lat_name="lat", lon_name="
 
 @plot("figure")
 def polar_grid(da, row_dim=None, col_dim=None, sel=None,
-               levels=np.linspace(-3, 3, 13), cmap="RdBu_r",
+               levels=np.linspace(-3, 3, 13), cmap="RdBu_r", norm=None,
                lat_name="lat", lon_name="lon", label_fmt=None,
                title=None, cbar_label=None, projection=None, tag=True,
                fig=None, spec=None, layout=None, ax=None, axes=None, cax=None,
@@ -277,7 +287,7 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
     def draw_panel(ax, row_key, col_key):
         field = select_panel(da, row_dim, row_key)
         field = select_panel(field, col_dim, col_key)
-        return draw_polar_contour(ax, field, levels, cmap, lat_name, lon_name)
+        return draw_polar_contour(ax, field, levels, cmap, norm, lat_name, lon_name)
 
     panels = panel_grid(
         row_keys,
@@ -307,3 +317,97 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
         add_suptitle(panels.fig, panels.layout, title)
 
     return panels
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+import cartopy.crs as ccrs
+from cartopy.util import add_cyclic_point
+
+
+def stipple_mask(p, threshold=0.01):
+    """Mask grid cells that fail a significance threshold.
+
+    Args:
+        p (xr.DataArray): p-values.
+        threshold (float): significance level.
+
+    Returns:
+        xr.DataArray: boolean, True where p is not below threshold.
+    """
+    return p >= threshold
+
+
+def plot_stipple(ax, mask, every=None, marker='.', size=1.0, color='k'):
+    """Scatter stipple markers on a map axis where mask is True.
+
+    Args:
+        ax (GeoAxes): axis to draw on.
+        mask (xr.DataArray): 2-D boolean mask with lat and lon dims.
+        every (int): plot every nth grid cell in lat and lon, or None for all.
+        marker (str): matplotlib marker.
+        size (float): marker size in points squared.
+        color (str): marker colour.
+
+    Returns:
+        PathCollection: the scatter artist.
+    """
+    if every is not None:
+        mask = mask.isel(lat=slice(None, None, every), lon=slice(None, None, every))
+    points = mask.transpose('lat', 'lon').values
+    lon2d, lat2d = np.meshgrid(mask.lon.values, mask.lat.values)
+    return ax.scatter(
+        lon2d[points],
+        lat2d[points],
+        s=size,
+        marker=marker,
+        color=color,
+        linewidths=0,
+        transform=ccrs.PlateCarree(),
+    )
+
+
+def plot_hatch(ax, mask, hatch='...', color='k', linewidth=0.3):
+    """Hatch regions of a map axis where mask is True.
+
+    Args:
+        ax (GeoAxes): axis to draw on.
+        mask (xr.DataArray): 2-D boolean mask with lat and lon dims.
+        hatch (str): matplotlib hatch pattern; repeat to increase density.
+        color (str): hatch line colour.
+        linewidth (float): hatch line width in points.
+
+    Returns:
+        QuadContourSet: the contour artist.
+    """
+    field = mask.transpose('lat', 'lon').values.astype(float)
+    field, lon = add_cyclic_point(field, coord=mask.lon.values)
+    with plt.rc_context({'hatch.linewidth': linewidth, 'hatch.color': color}):
+        return ax.contourf(
+            lon,
+            mask.lat.values,
+            field,
+            levels=[0.5, 1.5],
+            colors='none',
+            hatches=[hatch],
+            transform=ccrs.PlateCarree(),
+        )
+def map_panels(panels, da, draw, row_dim=None, col_dim=None, sel=None, **kwargs):
+    """Apply a drawing function to every panel of a polar_grid figure."""
+    if sel:
+        da = da.sel(sel)
+
+    artists = np.empty(panels.axes.shape, dtype=object)
+
+    for i in range(panels.axes.shape[0]):
+        for j in range(panels.axes.shape[1]):
+            indexer = {}
+            if row_dim is not None:
+                indexer[row_dim] = i
+            if col_dim is not None:
+                indexer[col_dim] = j
+
+            field = da.isel(indexer) if indexer else da
+            artists[i, j] = draw(panels.axes[i, j], field, **kwargs)
+
+    return artists
