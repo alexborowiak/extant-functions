@@ -8,57 +8,51 @@ import matplotlib.pyplot as plt
 from plotting_modules import core
 
 
-def test_panel_grid_infers_figure_and_reshapes_a_vertical_axes_vector():
+def test_panel_grid_reuses_a_vertical_axes_vector():
     fig, axes = plt.subplots(3, 1)
-    seen = []
 
     try:
-        panels = core.panel_grid(
-            ["signal", "noise", "sn"],
-            [None],
-            lambda ax, row, col: seen.append((ax, row, col)),
-            axes=axes,
-            sharex=True,
-        )
+        panels = core.panel_grid(3, 1, axes=axes, sharex=True)
 
         assert panels.fig is fig
         assert panels.axes.shape == (3, 1)
-        assert [ax for ax, _, _ in seen] == list(axes)
-        assert [row for _, row, _ in seen] == ["signal", "noise", "sn"]
+        assert list(panels.axes[:, 0]) == list(axes)
         assert axes[0].get_shared_x_axes().joined(axes[0], axes[1])
         assert len(fig.axes) == 3
     finally:
         plt.close(fig)
 
 
-def test_panel_grid_accepts_integer_grid_sizes_and_descriptive_keywords():
-    fig, axes = plt.subplots(2, 3, squeeze=False)
-    seen = []
+def test_panel_grid_creates_axes_ready_for_direct_plotting():
+    panels = core.panel_grid(n_rows=2, n_cols=3)
+    try:
+        fig, axes = panels
+        axes[1, 2].plot([0, 1], [2, 3])
+        assert panels.axes.shape == (2, 3)
+        assert len(fig.axes) == 6
+        assert len(axes[1, 2].lines) == 1
+    finally:
+        plt.close(panels.fig)
+
+
+def test_panel_grid_accepts_one_existing_axis():
+    fig, ax = plt.subplots()
 
     try:
-        panels = core.panel_grid(
-            row_keys=2,
-            col_keys=3,
-            draw_panel=lambda ax, row, col: seen.append((ax, row, col)),
-            axes=axes,
-        )
+        panels = core.panel_grid(1, 1, ax=ax)
 
-        assert panels.axes.shape == (2, 3)
-        assert [(row, col) for _, row, col in seen] == [
-            (0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)
-        ]
+        assert panels.fig is fig
+        assert panels.axes[0, 0] is ax
     finally:
         plt.close(fig)
 
 
-def test_panel_grid_keeps_caller_axes_in_its_positional_slot():
+def test_panel_grid_does_not_own_a_colorbar_for_caller_axes():
     fig, ax = plt.subplots()
-
     try:
-        panels = core.panel_grid([None], [None], lambda *_: None, fig, None, ax)
-
-        assert panels.fig is fig
-        assert panels.axes[0, 0] is ax
+        with pytest.raises(ValueError, match="create cax in your GridSpec"):
+            core.panel_grid(1, 1, ax=ax, colorbar=True)
+        assert len(fig.axes) == 1
     finally:
         plt.close(fig)
 
@@ -73,7 +67,7 @@ def test_nested_layout_uses_relative_colorbar_height():
     try:
         gs = layout.make_gridspec(fig)
         panel = fig.add_subplot(gs[0, 0])
-        cax = layout.cbar_ax(fig)
+        cax = fig.add_subplot(layout.colorbar_spec())
 
         assert cax.get_position().height / panel.get_position().height == pytest.approx(
             0.25
@@ -83,13 +77,12 @@ def test_nested_layout_uses_relative_colorbar_height():
 
 
 def test_grid_layout_keeps_automatic_colorbars_in_gridspec():
-    layout = core.GridLayout(1, 2, has_cbar=True, cbar_height=0.30, cbar_gap=0.20)
-    fig = layout.make_figure()
+    panels = core.panel_grid(1, 2, colorbar=True, cbar_height=0.30, cbar_gap=0.20)
 
     try:
-        panels = layout.make_gridspec(fig)
-        panel = fig.add_subplot(panels[0, 0])
-        cax = layout.cbar_ax(fig)
+        cax = panels.colorbar_ax()
+        panel = panels.axes[0, 0]
+        layout = panels.layout
 
         assert cax.get_subplotspec() is not None
         assert cax.get_position().height == pytest.approx(layout.fy(0.30))
@@ -97,7 +90,7 @@ def test_grid_layout_keeps_automatic_colorbars_in_gridspec():
             layout.fy(0.20)
         )
     finally:
-        plt.close(fig)
+        plt.close(panels.fig)
 
 
 @pytest.mark.parametrize(

@@ -4,10 +4,8 @@ Everything here is allowed to know about seasons, forcings and experiments, and
 is expected to be called once from a notebook. Everything reusable lives in the
 `plotting_modules` package.
 
-The house pattern: build a GridLayout, hand a `draw_panel(ax, row_key, col_key)`
-callback to `panel_grid`, then decorate. The callback closes over whatever data
-structure the figure happens to have, which is why `panel_grid` takes a
-callback rather than an array.
+The house pattern: create the axes with `panel_grid`, draw into each axes,
+then add labels and colorbars.
 """
 
 import numpy as np
@@ -91,21 +89,8 @@ def quantile_matrix(ds, row_dim="season", quant_dim="quantile", q_low=0.1, q_hig
     col_titles = [f"p{int(q_low * 100)}", "p50", f"p{int(q_high * 100)}",
                   f"p{int(q_high * 100)} - p{int(q_low * 100)}"]
 
-    def draw_panel(ax, row_key, column):
-        ds_row = ds.sel({row_dim: row_key}) if row_dim in ds.dims else ds
-        kind, q = column
-        if kind == "diff":
-            da = (ds_row.sel({quant_dim: q_high}, method="nearest")
-                  - ds_row.sel({quant_dim: q_low}, method="nearest"))
-            levels = diff_levels
-        else:
-            da = ds_row.sel({quant_dim: q}, method="nearest")
-            levels = raw_levels
-        return maps.draw_polar_contour(ax, da, levels, cmap, lat_name, lon_name)
-
     layout_kwargs.setdefault("row_labels", any(key is not None for key in row_keys))
     layout_kwargs.setdefault("has_title", title is not None)
-    layout_kwargs.setdefault("has_cbar", caxes is None)
     layout_kwargs.setdefault(
         "has_cbar_label", caxes is None and (raw_label is not None or diff_label is not None)
     )
@@ -124,9 +109,24 @@ def quantile_matrix(ds, row_dim="season", quant_dim="quantile", q_low=0.1, q_hig
             layout_kwargs["cbar_gap"] = cbar_gap
 
     panels = core.panel_grid(
-        row_keys, columns, draw_panel, fig=fig, spec=spec, layout=layout,
-        ax=ax, axes=axes, projection=ccrs.SouthPolarStereo(), **layout_kwargs
+        len(row_keys), len(columns), fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, projection=ccrs.SouthPolarStereo(),
+        colorbar=caxes is None and not caller_axes, **layout_kwargs,
     )
+    for row, row_key in enumerate(row_keys):
+        ds_row = ds.sel({row_dim: row_key}) if row_dim in ds.dims else ds
+        for col, (kind, q) in enumerate(columns):
+            if kind == "diff":
+                field = (ds_row.sel({quant_dim: q_high}, method="nearest")
+                         - ds_row.sel({quant_dim: q_low}, method="nearest"))
+                levels = diff_levels
+            else:
+                field = ds_row.sel({quant_dim: q}, method="nearest")
+                levels = raw_levels
+            panels.artists[row, col] = maps.draw_polar_contour(
+                panels.axes[row, col], field, levels, cmap,
+                lat_name=lat_name, lon_name=lon_name,
+            )
 
     core.label_cols(panels.axes, col_titles)
     core.label_rows(panels.axes, row_keys)
@@ -134,8 +134,8 @@ def quantile_matrix(ds, row_dim="season", quant_dim="quantile", q_low=0.1, q_hig
 
     if caxes is None and not caller_axes:
         caxes = (
-            panels.layout.cbar_ax(panels.fig, 0, 2),
-            panels.layout.cbar_ax(panels.fig, 3, 3),
+            panels.colorbar_ax(0, 2),
+            panels.colorbar_ax(3, 3),
         )
     if caxes is not None:
         caxes = np.asarray(caxes, dtype=object).ravel()
@@ -220,43 +220,45 @@ def quantile_summary(da_point, q_pairs=((0.01, 0.99), (0.1, 0.9), (0.25, 0.75)),
     seasons = list(da_point.season.values)
     colors = SEASON_COLORS if colors is None else colors
 
-    def draw_panel(ax, row_key, season):
-        da_season = da_point.sel(season=season)
-        time_dim = "year" if "year" in da_season.coords else da_season.dims[0]
-        first = season == seasons[0]
-        color = colors.get(season, "C0")
-        ax.grid(True, linestyle=":", alpha=0.5)
-        ax.tick_params(labelsize=8)
-
-        if row_key == "spread":
-            artists = _draw_spread(ax, da_season, q_pairs, color, time_dim,
-                                   label=first, styles=spread_styles,
-                                   alphas=spread_alphas)
-            ax.set_title(season, fontsize=11, fontweight="bold", pad=4)
-            ax.tick_params(labelbottom=False)
-            ax.set_ylabel("Δ Quantiles" if first else "", fontsize=9)
-            if first:
-                ax.legend(fontsize=7, loc="upper left", frameon=True, framealpha=0.8)
-            return artists
-
-        line = timeseries.draw_plume(
-            ax, da_season, pairs=q_pairs, median=q_med, color=color,
-            alphas=band_alphas, edge_widths=band_edge_widths,
-            edge_styles=band_edge_styles, edge_alpha=0.6, lw=1.8,
-            label="Median" if first else None, x_dim=time_dim,
-        )
-        ax.set_xlabel("Year", fontsize=9)
-        ax.set_ylabel("Difference (hist-nat - hist)" if first else "", fontsize=9)
-        return line
-
     layout_kwargs.setdefault("row_heights", [1.6, 3.5])
     layout_kwargs.setdefault("panel_w", 3.2)
     layout_kwargs.setdefault("hspace", 0.35)
     layout_kwargs.setdefault("wspace", 0.55)
     layout_kwargs.setdefault("bottom", 0.85)
-    panels = core.panel_grid(["spread", "plume"], seasons, draw_panel,
-                             fig=fig, spec=spec, layout=layout, sharex=True,
-                             ax=ax, axes=axes, **layout_kwargs)
+    panels = core.panel_grid(
+        2, len(seasons), fig=fig, spec=spec, layout=layout, sharex=True,
+        ax=ax, axes=axes, **layout_kwargs,
+    )
+    for col, season in enumerate(seasons):
+        da_season = da_point.sel(season=season)
+        time_dim = "year" if "year" in da_season.coords else da_season.dims[0]
+        first = col == 0
+        color = colors.get(season, "C0")
+        spread_ax, plume_ax = panels.axes[:, col]
+        for current_ax in (spread_ax, plume_ax):
+            current_ax.grid(True, linestyle=":", alpha=0.5)
+            current_ax.tick_params(labelsize=8)
+
+        panels.artists[0, col] = _draw_spread(
+            spread_ax, da_season, q_pairs, color, time_dim,
+            label=first, styles=spread_styles, alphas=spread_alphas,
+        )
+        spread_ax.set_title(season, fontsize=11, fontweight="bold", pad=4)
+        spread_ax.tick_params(labelbottom=False)
+        spread_ax.set_ylabel("Δ Quantiles" if first else "", fontsize=9)
+        if first:
+            spread_ax.legend(fontsize=7, loc="upper left", frameon=True,
+                             framealpha=0.8)
+
+        panels.artists[1, col] = timeseries.draw_plume(
+            plume_ax, da_season, pairs=q_pairs, median=q_med, color=color,
+            alphas=band_alphas, edge_widths=band_edge_widths,
+            edge_styles=band_edge_styles, edge_alpha=0.6, lw=1.8,
+            label="Median" if first else None, x_dim=time_dim,
+        )
+        plume_ax.set_xlabel("Year", fontsize=9)
+        plume_ax.set_ylabel("Difference (hist-nat - hist)" if first else "",
+                            fontsize=9)
 
     handles = (panels.axes[1, 0].get_legend_handles_labels()[0]
                + timeseries.plume_handles(q_pairs, band_alphas))
@@ -332,15 +334,15 @@ def tas_buildup_figure(tas_by_forcing, revealed, ylim, order=None, fade_earlier=
     layout_kwargs.setdefault("bottom", 0.6)
     layout_kwargs.setdefault("top", 0.9)
 
-    def draw_panel(ax, _row, _col):
-        artists = timeseries.draw_reveal(
-            ax, tas_by_forcing, revealed, FORCING_COLORS, fade=fade_earlier
-        )
-        _style_buildup_ax(ax, ylim, baseline=baseline, xlim=xlim)
-        return artists
-
-    panels = core.panel_grid([None], [None], draw_panel, fig=fig, spec=spec,
-                             layout=layout, ax=ax, axes=axes, **layout_kwargs)
+    panels = core.panel_grid(
+        1, 1, fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, **layout_kwargs,
+    )
+    panel_ax = panels.axes[0, 0]
+    panels.artists[0, 0] = timeseries.draw_reveal(
+        panel_ax, tas_by_forcing, revealed, FORCING_COLORS, fade=fade_earlier
+    )
+    _style_buildup_ax(panel_ax, ylim, baseline=baseline, xlim=xlim)
     panels.extras["legend"] = core.reveal_legend(
         panels.fig, order, FORCING_COLORS, FORCING_LEGEND_LABELS, revealed,
         ncols=3, loc="upper center", bbox_to_anchor=(0.5, 1.0),

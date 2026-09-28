@@ -10,26 +10,30 @@ from matplotlib import cm, colors
 cartopy = pytest.importorskip("cartopy.crs")
 xr = pytest.importorskip("xarray")
 
-from plotting_modules import figures, maps
+from plotting_modules import core, figures, maps
 
 
 def test_polar_grid_uses_caller_axes_and_cax(monkeypatch):
     field = xr.DataArray(
-        [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
-        dims=("period", "lat", "lon"),
-        coords={"period": ["early", "late"], "lat": [-80, -70], "lon": [0, 180]},
+        np.arange(24).reshape(3, 2, 2, 2),
+        dims=("kind", "period", "lat", "lon"),
+        coords={
+            "kind": ["signal", "noise", "sn"],
+            "period": ["early", "late"],
+            "lat": [-80, -70],
+            "lon": [0, 180],
+        },
     )
     fig = plt.figure()
-    grid = fig.add_gridspec(2, 2, height_ratios=[1, .06])
-    axes = np.array([[
-        fig.add_subplot(grid[0, col], projection=cartopy.SouthPolarStereo())
-        for col in range(2)
-    ]], dtype=object)
-    cax = fig.add_subplot(grid[1, :])
+    grid = fig.add_gridspec(2, 1, height_ratios=[3, .08])
+    axes = core.panel_grid(
+        3, 2, fig=fig, spec=grid[0], projection=cartopy.SouthPolarStereo()
+    ).axes
+    cax = fig.add_subplot(grid[1])
     seen = []
 
     def draw_contour(ax, da, *args, **kwargs):
-        seen.append((ax, da.period.item()))
+        seen.append((ax, da.kind.item(), da.period.item()))
         mappable = cm.ScalarMappable(norm=colors.Normalize(-3, 3), cmap="RdBu_r")
         mappable.set_array([-3, 3])
         return mappable
@@ -37,13 +41,18 @@ def test_polar_grid_uses_caller_axes_and_cax(monkeypatch):
     monkeypatch.setattr(maps, "draw_polar_contour", draw_contour)
     try:
         panels = maps.polar_grid(
-            field, col_dim="period", axes=axes, cax=cax, tag=False
+            field, row_dim="kind", col_dim="period", axes=axes, cax=cax,
+            tag=False,
         )
 
         assert panels.fig is fig
         assert panels.axes[0, 0] is axes[0, 0]
-        assert panels.axes[0, 1] is axes[0, 1]
-        assert seen == [(axes[0, 0], "early"), (axes[0, 1], "late")]
+        assert panels.axes[2, 1] is axes[2, 1]
+        assert seen == [
+            (axes[row, col], kind, period)
+            for row, kind in enumerate(("signal", "noise", "sn"))
+            for col, period in enumerate(("early", "late"))
+        ]
         assert panels.extras["cbar"].ax is cax
     finally:
         plt.close(fig)

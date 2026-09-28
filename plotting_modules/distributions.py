@@ -1,7 +1,7 @@
 """Distributions: KDEs, histograms and per-member bars.
 
-The grid functions here take a dict of datasets keyed by experiment, which is
-why they build their own panel callbacks rather than taking a DataArray.
+The grid functions here take datasets keyed by experiment and draw directly
+into their axes.
 """
 
 import numpy as np
@@ -51,13 +51,15 @@ PANEL_KWARGS = dict(panel_w=1.8, panel_h=1.6, wspace=0.08, hspace=0.10,
                     left=0.75, bottom=0.55)
 
 
-def _grid(row_keys, col_keys, draw_panel, xlabel, col_fmt=str, **kwargs):
-    """Shared body of every distribution grid: panels, hide inner, label, return."""
+def _new_grid(n_rows, n_cols, **kwargs):
+    """Create the shared distribution layout."""
     for key, value in PANEL_KWARGS.items():
         kwargs.setdefault(key, value)
-    panels = core.panel_grid(
-        row_keys, col_keys, draw_panel, sharex=True, sharey=True, **kwargs
-    )
+    return core.panel_grid(n_rows, n_cols, sharex=True, sharey=True, **kwargs)
+
+
+def _label_grid(panels, row_keys, col_keys, xlabel, col_fmt=str):
+    """Apply the shared distribution labels after drawing."""
     core.hide_inner_labels(panels.axes)
     core.label_cols(panels.axes, col_keys, col_fmt, pad=6, fontweight="normal")
     core.label_rows(panels.axes, row_keys, rotate=True, fontweight="normal")
@@ -91,21 +93,24 @@ def kde_grid(kde, periods, colors, variable="tas", fig=None, spec=None, layout=N
     -------
     core.Panels
     """
-    def draw_panel(ax, exp, period):
-        da = kde[exp][variable].sel(year=period)
-        if "year" in da.dims:
-            da = da.mean("year")
-        line, = ax.plot(da.x, da, color=colors[exp])
-        ax.set_title("")
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        core.style_ax(ax)
-        return line
-
-    return _grid(
-        list(kde), periods, draw_panel, variable, col_fmt=period_label, fig=fig,
-        spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
+    experiments = list(kde)
+    panels = _new_grid(
+        len(experiments), len(periods), fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, **layout_kwargs,
     )
+    for row, exp in enumerate(experiments):
+        for col, period in enumerate(periods):
+            da = kde[exp][variable].sel(year=period)
+            if "year" in da.dims:
+                da = da.mean("year")
+            panel_ax = panels.axes[row, col]
+            line, = panel_ax.plot(da.x, da, color=colors[exp])
+            panels.artists[row, col] = line
+            panel_ax.set_title("")
+            panel_ax.set_xlabel("")
+            panel_ax.set_ylabel("")
+            core.style_ax(panel_ax)
+    return _label_grid(panels, experiments, periods, variable, period_label)
 
 
 @plot("figure")
@@ -125,22 +130,23 @@ def kde_overlay(kde, periods, colors, variable="tas", fig=None, spec=None, layou
     """
     experiments = list(kde)
 
-    def draw_panel(ax, _, period):
+    panels = _new_grid(
+        1, len(periods), fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, **layout_kwargs,
+    )
+    for col, period in enumerate(periods):
+        panel_ax = panels.axes[0, col]
         lines = []
         for exp in experiments:
             da = kde[exp][variable].sel(year=period)
             if "year" in da.dims:
                 da = da.mean("year")
-            lines += ax.plot(da.x, da, color=colors[exp], label=exp)
-        ax.set_title("")
-        ax.set_ylabel("")
-        core.style_ax(ax)
-        return lines
-
-    panels = _grid(
-        [None], periods, draw_panel, variable, col_fmt=period_label, fig=fig,
-        spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
-    )
+            lines += panel_ax.plot(da.x, da, color=colors[exp], label=exp)
+        panels.artists[0, col] = lines
+        panel_ax.set_title("")
+        panel_ax.set_ylabel("")
+        core.style_ax(panel_ax)
+    _label_grid(panels, [None], periods, variable, period_label)
     panels.axes[0, 0].set_ylabel("Density")
     handles, labels = panels.axes[0, 0].get_legend_handles_labels()
     panels.extras["legend"] = panels.fig.legend(
@@ -165,20 +171,21 @@ def hist_grid(point, periods, colors, variable="tas", n_bins=20, fig=None,
     experiments = list(point)
     bins = hist_bins(point, periods, experiments, variable, n_bins)
 
-    def draw_panel(ax, exp, period):
-        out = point.sel(year=period)[exp][variable].plot.hist(
-            ax=ax, bins=bins, color=colors[exp], alpha=0.5
-        )
-        ax.set_title("")
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.set_xlim(bins[0], bins[-1])
-        core.style_ax(ax)
-        return out
-
-    panels = _grid(
-        experiments, periods, draw_panel, variable, col_fmt=period_label, fig=fig,
-        spec=spec, layout=layout, ax=ax, axes=axes, **layout_kwargs
+    panels = _new_grid(
+        len(experiments), len(periods), fig=fig, spec=spec, layout=layout,
+        ax=ax, axes=axes, **layout_kwargs,
     )
+    for row, exp in enumerate(experiments):
+        for col, period in enumerate(periods):
+            panel_ax = panels.axes[row, col]
+            panels.artists[row, col] = point.sel(year=period)[exp][variable].plot.hist(
+                ax=panel_ax, bins=bins, color=colors[exp], alpha=0.5
+            )
+            panel_ax.set_title("")
+            panel_ax.set_xlabel("")
+            panel_ax.set_ylabel("")
+            panel_ax.set_xlim(bins[0], bins[-1])
+            core.style_ax(panel_ax)
+    _label_grid(panels, experiments, periods, variable, period_label)
     panels.extras["bins"] = bins
     return panels

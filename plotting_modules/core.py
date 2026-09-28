@@ -1,8 +1,7 @@
 """Shared panel-grid and layout helpers.
 
-``panel_grid`` creates axes and calls a drawing function once for every row
-and column key. Figure functions in the package use it to turn data
-coordinates (such as season and period) into panels.
+``panel_grid`` creates an N-by-M array of axes. Plot directly into those axes
+with ordinary loops; it does not choose data or draw anything.
 
 ``GridLayout`` owns a whole figure and uses inches for panel and colorbar
 sizes. ``NestedLayout`` fills one cell of a parent GridSpec and uses relative
@@ -196,14 +195,14 @@ class GridLayout:
         )
         return self._panel_gridspec(fig, outer[0, 0])
 
-    def cbar_ax(self, fig, first_col=0, last_col=None):
-        """Colorbar axes spanning complete panel columns in the reserved row."""
+    def colorbar_spec(self, first_col=0, last_col=None):
+        """GridSpec slot for a colorbar spanning the selected panel columns."""
         if not self.has_cbar:
             raise ValueError("layout was built with has_cbar=False")
         last_col = self.n_cols - 1 if last_col is None else last_col
         if self._cbar_gs is None:
-            raise RuntimeError("call make_gridspec before requesting a colorbar axes")
-        return fig.add_subplot(self._cbar_gs[0, first_col : last_col + 1])
+            raise RuntimeError("call make_gridspec before requesting a colorbar slot")
+        return self._cbar_gs[0, first_col : last_col + 1]
 
     def title_y(self, fig=None, pad=0.18):
         """Figure-fraction y for a top-aligned title."""
@@ -277,14 +276,14 @@ class NestedLayout:
         )
         return self._gs
 
-    def cbar_ax(self, fig, first_col=0, last_col=None):
-        """Colorbar axes in the reserved bottom row of the sub-gridspec."""
+    def colorbar_spec(self, first_col=0, last_col=None):
+        """GridSpec slot in the reserved bottom row for a colorbar."""
         if not self.has_cbar:
             raise ValueError("layout was built with has_cbar=False")
         if self._gs is None:
-            raise RuntimeError("call make_gridspec before requesting a colorbar axes")
+            raise RuntimeError("call make_gridspec before requesting a colorbar slot")
         last_col = self.n_cols - 1 if last_col is None else last_col
-        return fig.add_subplot(self._gs[-1, first_col : last_col + 1])
+        return self._gs[-1, first_col : last_col + 1]
 
     def title_y(self, fig, pad=0.01):
         """Figure-fraction y just above the parent cell."""
@@ -360,6 +359,16 @@ class Panels:
     def flat(self):
         """The axes as a flat list, row-major."""
         return list(np.atleast_2d(self.axes).ravel())
+
+    def colorbar_ax(self, first_col=0, last_col=None):
+        """Add axes in the reserved GridSpec colorbar row.
+
+        Reserve the row with ``panel_grid(..., colorbar=True)``. For a figure
+        with caller-owned axes, create a colorbar axes in its GridSpec instead.
+        """
+        if self.layout is None:
+            raise ValueError("caller-owned axes need a caller-owned colorbar axes")
+        return self.fig.add_subplot(self.layout.colorbar_spec(first_col, last_col))
 
 
 # --------------------------------------------------------------------------
@@ -485,25 +494,6 @@ def _panel_axes(axes, n_rows, n_cols):
     return axes.reshape(n_rows, n_cols)
 
 
-def _grid_keys(keys, axis):
-    """Turn an integer grid size or an iterable of per-panel keys into a list."""
-    if isinstance(keys, (int, np.integer)) and not isinstance(keys, bool):
-        if keys < 1:
-            raise ValueError(f"{axis}_keys must be a positive integer")
-        return list(range(keys))
-    if isinstance(keys, str):
-        raise TypeError(f"{axis}_keys must be an iterable; wrap one string in a list")
-    try:
-        keys = list(keys)
-    except TypeError as error:
-        raise TypeError(
-            f"{axis}_keys must be a positive integer or an iterable of keys"
-        ) from error
-    if not keys:
-        raise ValueError(f"{axis}_keys cannot be empty")
-    return keys
-
-
 def _share_axes(axes, sharex, sharey):
     """Apply the same sharing groups to caller-owned axes as new axes."""
     x_refs, y_refs = {}, {}
@@ -526,63 +516,54 @@ def _share_axes(axes, sharex, sharey):
 
 
 def panel_grid(
-    row_keys,
-    col_keys,
-    draw_panel,
-    fig=None,
-    gs=None,
+    n_rows,
+    n_cols,
+    *,
+    colorbar=False,
     axes=None,
+    ax=None,
+    fig=None,
     spec=None,
     layout=None,
     projection=None,
     sharex=False,
     sharey=False,
-    ax=None,
+    gs=None,
     **layout_kwargs,
 ):
-    """Create a panel grid and call ``draw_panel`` once for every cell.
+    """Create or accept a grid of axes; return ``Panels(fig, axes, layout)``.
 
-    This is a data-facet helper, not a title helper. ``row_keys`` and
-    ``col_keys`` determine the grid shape and are handed unchanged to
-    ``draw_panel``. For example, a grid keyed by data coordinates calls::
+    ``axes`` is always a 2-D array with shape ``(n_rows, n_cols)``. This
+    function does not plot or set titles::
 
-        draw_panel(axes[row_index, col_index],
-                   row_keys[row_index], col_keys[col_index])
+        fig, axes = panel_grid(3, 2)
+        for row in range(3):
+            for col in range(2):
+                axes[row, col].plot(data[row, col])
 
-    It does not label panels. Call ``label_rows`` and ``label_cols`` after
-    drawing when those keys should also be display labels.
+    To reserve a GridSpec row for a horizontal colorbar::
 
-    Examples
-    --------
-    An ordinary indexed 3-by-2 grid::
+        panels = panel_grid(1, 1, colorbar=True, cbar_height=.2)
+        image = panels.axes[0, 0].imshow(data)
+        panels.fig.colorbar(
+            image, cax=panels.colorbar_ax(), orientation="horizontal"
+        )
 
-        def draw_panel(ax, row, col):
-            ax.text(.5, .5, f"row {row}, column {col}", ha="center")
+    For an existing figure, pass its axes directly::
 
-        panels = panel_grid(3, 2, draw_panel)
-
-    A data-coordinate grid::
-
-        def draw_panel(ax, kind, period):
-            return field.sel(kind=kind, period=period).plot(ax=ax)
-
-        panels = panel_grid(["signal", "noise", "sn"], periods, draw_panel)
+        fig, axes = panel_grid(3, 2, axes=my_axes)
 
     Parameters
     ----------
-    row_keys, col_keys : int or iterable
-        A positive integer makes indexed keys ``range(n)``. Otherwise every
-        item makes one row or column and is passed unchanged to
-        ``draw_panel``. These are not display labels. Use ``[None]`` for a
-        single row or column with no key.
-    draw_panel : callable
-        Called as ``draw_panel(ax, row_key, col_key)``. Draw into ``ax`` and
-        return an artist/mappable to retain it in ``Panels.artists``; return
-        ``None`` when nothing needs retaining.
+    n_rows, n_cols : int
+        Number of panel rows and columns. Both must be positive.
     ax, axes : matplotlib.axes.Axes or array-like, optional
         Existing target axes. ``ax`` is the one-panel shortcut; ``axes`` must
-        have one axis per row/column key in row-major order. Their figure is
+        have ``n_rows * n_cols`` axes in row-major order. Their figure is
         inferred when ``fig`` is omitted.
+    colorbar : bool
+        Reserve a GridSpec row for colorbars when creating the panel axes.
+        Use ``panels.colorbar_ax()`` to place an axes in that row.
     fig, gs, spec, layout, **layout_kwargs
         Layout inputs used only when this function creates the axes. ``gs``
         needs its owning ``fig``; otherwise ``open_layout`` resolves a whole
@@ -595,16 +576,26 @@ def panel_grid(
     -------
     Panels
     """
-    row_keys = _grid_keys(row_keys, "row")
-    col_keys = _grid_keys(col_keys, "col")
-    if not callable(draw_panel):
-        raise TypeError("draw_panel must be callable")
-    n_rows, n_cols = len(row_keys), len(col_keys)
+    if any(
+        isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1
+        for n in (n_rows, n_cols)
+    ):
+        raise ValueError("n_rows and n_cols must be positive integers")
 
     if ax is not None:
         if axes is not None:
             raise ValueError("pass either ax or axes, not both")
         axes = ax
+
+    if colorbar:
+        if axes is not None or gs is not None:
+            raise ValueError(
+                "colorbar=True needs a grid created here; for caller-owned "
+                "axes, create cax in your GridSpec"
+            )
+        if layout is not None and not layout.has_cbar:
+            raise ValueError("the supplied layout must reserve a colorbar row")
+        layout_kwargs["has_cbar"] = True
 
     if axes is None:
         if gs is None:
@@ -627,12 +618,10 @@ def panel_grid(
             raise ValueError("fig does not own the supplied axes")
         _share_axes(axes, sharex, sharey)
 
-    artists = np.empty((n_rows, n_cols), dtype=object)
-    for r, row_key in enumerate(row_keys):
-        for c, col_key in enumerate(col_keys):
-            artists[r, c] = draw_panel(axes[r, c], row_key, col_key)
-
-    return Panels(fig=fig, axes=axes, layout=layout, artists=artists)
+    return Panels(
+        fig=fig, axes=axes, layout=layout,
+        artists=np.full((n_rows, n_cols), None, dtype=object),
+    )
 
 
 # --------------------------------------------------------------------------

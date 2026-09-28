@@ -1,13 +1,8 @@
 """Anything on a projection. The only module that needs cartopy.
 
-Layers:
-  Primitive   setup_polar_ax, draw_polar_contour — draw on one axes.
-  Selection   select, panel_keys, select_panel, prepare — turn a DataArray plus
-              sel/row/col into the coordinates core.panel_grid iterates over.
-  Figure      polar_grid — DataArray in, figure out.
+Use ``draw_polar_contour`` for one axes and ``polar_grid`` for a grid of maps.
 
-For mixed figures, pass caller-owned `axes` to polar_grid. For a custom map,
-call draw_polar_contour from your own per-panel draw function.
+For mixed figures, pass caller-owned ``axes`` to ``polar_grid``.
 """
 
 import numpy as np
@@ -127,50 +122,6 @@ def draw_polar_contour(
     return cf
 
 # --------------------------------------------------------------------------
-# Turning a DataArray into panel coordinates
-# --------------------------------------------------------------------------
-
-def select(da, sel):
-    """Apply a sel dict: a sequence subsets and orders, a scalar collapses."""
-    for dim, value in sel.items():
-        if isinstance(value, (list, tuple, np.ndarray)):
-            da = da.sel({dim: list(value)})
-        else:
-            da = da.sel({dim: value})
-    return da
-
-def panel_keys(da, dim):
-    """Keys for panels along `dim`, or [None] when it is not a grid dimension."""
-    if dim is None or dim not in da.dims:
-        return [None]
-    return list(np.atleast_1d(da[dim].values))
-
-def select_panel(da, dim, key):
-    """Select one panel key; ``None`` means that dimension is not faceted."""
-    return da if key is None else da.sel({dim: key})
-
-def prepare(da, sel=None, row_dim=None, col_dim=None, lat_name="lat", lon_name="lon"):
-    """Apply sel, drop degenerate dims, return (da, row_keys, col_keys).
-
-    Raises if any dimension is left neither collapsed by `sel` nor mapped to
-    rows, columns, latitude or longitude — silently plotting the first element
-    of an unmapped dimension is the failure mode this guards against.
-    """
-    da = select(da, sel) if sel else da
-    squeezable = [
-        d for d in da.dims if da.sizes[d] == 1 and d not in (lat_name, lon_name)
-    ]
-    da = da.squeeze(squeezable)
-
-    unmapped = [d for d in da.dims if d not in (lat_name, lon_name, row_dim, col_dim)]
-    if unmapped:
-        raise ValueError(
-            f"unmapped dimensions {unmapped}; pass them in sel, row_dim or col_dim"
-        )
-
-    return da, panel_keys(da, row_dim), panel_keys(da, col_dim)
-
-# --------------------------------------------------------------------------
 # Figure
 # --------------------------------------------------------------------------
 
@@ -239,22 +190,21 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
     Put signal, noise and S/N into rows of one caller-owned GridSpec::
 
         import matplotlib.pyplot as plt
-        import numpy as np
         import xarray as xr
         import cartopy.crs as ccrs
+        from plotting_modules.core import panel_grid
 
-        fig = plt.figure()
-        grid = fig.add_gridspec(4, n_periods, height_ratios=[1, 1, 1, .06])
-        axes = np.array([
-            [fig.add_subplot(grid[row, col], projection=ccrs.SouthPolarStereo())
-             for col in range(n_periods)]
-            for row in range(3)
-        ])
-        cax = fig.add_subplot(grid[3, :])
         fields = xr.concat(
             (signal, noise, sn),
             dim=xr.IndexVariable("kind", ("signal", "noise", "sn")),
         )
+        fig = plt.figure()
+        grid = fig.add_gridspec(2, 1, height_ratios=[3, .08])
+        axes = panel_grid(
+            3, fields.sizes["period"], fig=fig, spec=grid[0],
+            projection=ccrs.SouthPolarStereo(),
+        ).axes
+        cax = fig.add_subplot(grid[1])
         polar_grid(
             fields, row_dim="kind", col_dim="period", axes=axes, cax=cax,
             tag=False,
@@ -263,13 +213,29 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
     The figure owns every position in this example; ``polar_grid`` only draws
     into the supplied axes.
     """
-    da, row_keys, col_keys = prepare(da, sel, row_dim, col_dim, lat_name, lon_name)
+    for dim, value in (sel or {}).items():
+        if isinstance(value, (list, tuple, np.ndarray)):
+            value = list(value)
+        da = da.sel({dim: value})
+    da = da.squeeze([
+        dim for dim in da.dims
+        if da.sizes[dim] == 1 and dim not in (lat_name, lon_name)
+    ])
+    unmapped = [
+        dim for dim in da.dims
+        if dim not in (lat_name, lon_name, row_dim, col_dim)
+    ]
+    if unmapped:
+        raise ValueError(
+            f"unmapped dimensions {unmapped}; pass them in sel, row_dim or col_dim"
+        )
+    row_values = list(da[row_dim].values) if row_dim in da.dims else [None]
+    col_values = list(da[col_dim].values) if col_dim in da.dims else [None]
     fmt = label_fmt or {}
     caller_axes = ax is not None or axes is not None
 
-    layout_kwargs.setdefault("row_labels", any(key is not None for key in row_keys))
+    layout_kwargs.setdefault("row_labels", any(value is not None for value in row_values))
     layout_kwargs.setdefault("has_title", title is not None)
-    layout_kwargs.setdefault("has_cbar", cax is None)
     layout_kwargs.setdefault("has_cbar_label", cbar_label is not None and cax is None)
     if cbar_height is not None or cbar_gap is not None:
         if caller_axes or cax is not None:
@@ -284,27 +250,31 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
         if cbar_gap is not None:
             layout_kwargs["cbar_gap"] = cbar_gap
 
-    def draw_panel(ax, row_key, col_key):
-        field = select_panel(da, row_dim, row_key)
-        field = select_panel(field, col_dim, col_key)
-        return draw_polar_contour(ax, field, levels, cmap, norm, lat_name, lon_name)
-
     panels = panel_grid(
-        row_keys,
-        col_keys,
-        draw_panel,
+        len(row_values), len(col_values),
         fig=fig, spec=spec, layout=layout, ax=ax, axes=axes,
         projection=projection or ccrs.SouthPolarStereo(),
+        colorbar=cax is None and not caller_axes,
         **layout_kwargs,
     )
+    for row, row_value in enumerate(row_values):
+        for col, col_value in enumerate(col_values):
+            field = da
+            if row_value is not None:
+                field = field.sel({row_dim: row_value})
+            if col_value is not None:
+                field = field.sel({col_dim: col_value})
+            panels.artists[row, col] = draw_polar_contour(
+                panels.axes[row, col], field, levels, cmap, norm, lat_name, lon_name
+            )
 
-    label_cols(panels.axes, col_keys, fmt.get(col_dim, str))
-    label_rows(panels.axes, row_keys, fmt.get(row_dim, str))
+    label_cols(panels.axes, col_values, fmt.get(col_dim, str))
+    label_rows(panels.axes, row_values, fmt.get(row_dim, str))
     if tag:
         tag_panels(panels.axes)
 
     if cax is None and not caller_axes:
-        cax = panels.layout.cbar_ax(panels.fig, 0, len(col_keys) - 1)
+        cax = panels.colorbar_ax()
     if cax is not None:
         panels.extras["cbar"] = add_colorbar(
             panels.fig,
