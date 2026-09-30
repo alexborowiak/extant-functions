@@ -751,13 +751,33 @@ def add_colorbar(
     tick_step=2,
     labelsize=9,
     fontsize=10,
+    discrete=False,
+    ticklabels=None,
 ):
-    """Horizontal colorbar in `cax`, ticked at every `tick_step` level."""
+    """Horizontal colorbar in `cax`, ticked at every `tick_step` level.
+
+    With ``discrete=True``, `levels` are class edges: every class gets an
+    equal-width block with its tick at the centre, labelled by `ticklabels`
+    (default: the centre values, as integers where they are whole), and the
+    bar has no extension triangles.
+    """
     if cax is None or cax.figure is not fig:
         raise ValueError("cax must belong to fig")
-    if ticks is None and levels is not None:
+    kwargs = {}
+    if discrete:
+        if levels is None:
+            raise ValueError("a discrete colorbar needs the class edges as levels")
+        edges = np.asarray(levels, dtype=float)
+        ticks = (edges[:-1] + edges[1:]) / 2 if ticks is None else ticks
+        if ticklabels is None:
+            ticklabels = [f"{t:g}" for t in ticks]
+        kwargs = dict(boundaries=edges, extend="neither", spacing="uniform")
+    elif ticks is None and levels is not None:
         ticks = np.asarray(levels)[::tick_step]
-    cb = fig.colorbar(mappable, cax=cax, orientation="horizontal", ticks=ticks)
+    cb = fig.colorbar(mappable, cax=cax, orientation="horizontal", ticks=ticks, **kwargs)
+    if ticklabels is not None:
+        cb.set_ticks(ticks, labels=ticklabels)
+        cb.ax.tick_params(length=0)
     cb.ax.tick_params(labelsize=labelsize)
     if label:
         cb.set_label(label, fontsize=fontsize, labelpad=4)

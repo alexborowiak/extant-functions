@@ -7,6 +7,8 @@ For mixed figures, pass caller-owned ``axes`` to ``polar_grid``.
 
 import numpy as np
 import matplotlib.path as mpath
+import matplotlib.pyplot as plt
+from matplotlib.colors import BoundaryNorm
 import cartopy.crs as ccrs
 from cartopy.util import add_cyclic_point
 
@@ -67,8 +69,14 @@ def draw_polar_contour(
     lat_name="lat",
     lon_name="lon",
     extent=DEFAULT_EXTENT,
+    discrete=False,
 ):
     """Filled and line contours of a 2-D field on polar axes.
+
+    With ``discrete=True`` the field is drawn cell by cell with pcolormesh
+    instead. Use it for categorical fields (classes, counts): contourf
+    interpolates between cells, so a class-0 cell next to a class-2 cell grows
+    a false class-1 band between them.
 
     Parameters
     ----------
@@ -86,15 +94,32 @@ def draw_polar_contour(
         Latitude and longitude coordinate names.
     extent : sequence of float
         Passed to `setup_polar_ax`.
+    discrete : bool
+        Draw cells with pcolormesh rather than contours; see above.
 
     Returns
     -------
-    matplotlib.contour.QuadContourSet
-        Filled contour set for use as a colorbar mappable.
+    matplotlib.contour.QuadContourSet or matplotlib.collections.QuadMesh
+        Colorbar mappable.
     """
     da = da.transpose(lat_name, lon_name)
     data_cyclic, lons_cyclic = add_cyclic_point(da.values, coord=da[lon_name].values)
     lats = da[lat_name].values
+
+    if discrete:
+        if norm is None:
+            norm = BoundaryNorm(levels, plt.get_cmap(cmap).N)
+        mesh = ax.pcolormesh(
+            lons_cyclic,
+            lats,
+            np.ma.masked_invalid(data_cyclic),
+            transform=ccrs.PlateCarree(),
+            cmap=cmap,
+            norm=norm,
+            shading="nearest",
+        )
+        setup_polar_ax(ax, extent)
+        return mesh
 
     cf = ax.contourf(
         lons_cyclic,
@@ -130,6 +155,7 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
                levels=np.linspace(-3, 3, 13), cmap="RdBu_r", norm=None,
                lat_name="lat", lon_name="lon", label_fmt=None,
                title=None, cbar_label=None, projection=None, tag=True,
+               discrete=False, ticklabels=None,
                fig=None, spec=None, layout=None, ax=None, axes=None, cax=None,
                cbar_height=None, cbar_gap=None, **layout_kwargs):
     """Grid of polar panels with two dimensions mapped to rows and columns.
@@ -164,7 +190,14 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
         Defaults to SouthPolarStereo when this function creates the axes.
     tag : bool
         Letter the panels a) b) c).
-    ax : cartopy.mpl.geoaxes.GeoAxes or None
+    discrete : bool
+        Categorical field: draw cells rather than contours, and give the
+        colorbar one block per class, a tick at each block's centre and no
+        extension triangles. `levels` are then the class edges, e.g.
+        ``np.arange(-0.5, n + 0.5)`` for classes 0..n-1.
+    ticklabels : sequence of str or None
+        Labels for the class ticks when `discrete`; the class centres otherwise.
+    ax :cartopy.mpl.geoaxes.GeoAxes or None
         Target for a one-panel grid. Its figure is inferred when `fig` is
         omitted.
     axes : array-like of cartopy.mpl.geoaxes.GeoAxes or None
@@ -265,7 +298,8 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
             if col_value is not None:
                 field = field.sel({col_dim: col_value})
             panels.artists[row, col] = draw_polar_contour(
-                panels.axes[row, col], field, levels, cmap, norm, lat_name, lon_name
+                panels.axes[row, col], field, levels, cmap, norm, lat_name, lon_name,
+                discrete=discrete,
             )
 
     label_cols(panels.axes, col_values, fmt.get(col_dim, str))
@@ -282,6 +316,8 @@ def polar_grid(da, row_dim=None, col_dim=None, sel=None,
             cax,
             levels=levels,
             label=cbar_label,
+            discrete=discrete,
+            ticklabels=ticklabels,
         )
     if title and not caller_axes and panels.layout.owns_figure:
         add_suptitle(panels.fig, panels.layout, title)
